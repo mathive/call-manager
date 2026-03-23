@@ -18,7 +18,9 @@ import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.widget.Toolbar
+import androidx.core.content.edit
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import androidx.lifecycle.lifecycleScope
 import com.bumptech.glide.Glide
 import com.google.android.material.imageview.ShapeableImageView
@@ -37,8 +39,8 @@ import java.util.*
 
 class ContactDetailsActivity : AppCompatActivity() {
 
-    private val WHATSAPP_PKG = "com.whatsapp"
-    private val WHATSAPP_BUSINESS_PKG = "com.whatsapp.w4b"
+    private val whatsappPkg = "com.whatsapp"
+    private val whatsappBusinessPkg = "com.whatsapp.w4b"
     private val db = FirebaseFirestore.getInstance()
     private val auth = FirebaseAuth.getInstance()
     private var isBlockedLocally = false
@@ -87,6 +89,11 @@ class ContactDetailsActivity : AppCompatActivity() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED) {
             loadActualCallHistory(number)
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        FirestoreUi.showPendingMessageIfAny(this)
     }
 
     private fun checkGlobalAndLocalStatus(number: String, tvName: TextView, ivProfile: ShapeableImageView) {
@@ -169,11 +176,11 @@ class ContactDetailsActivity : AppCompatActivity() {
         if (isBlockedLocally) {
             ivIcon.setImageResource(R.drawable.ic_block)
             ivIcon.setColorFilter(getColor(R.color.brand_red))
-            tvLabel.text = "Unblock"
+            tvLabel.text = getString(R.string.unblock)
         } else {
             ivIcon.setImageResource(R.drawable.ic_block)
             ivIcon.setColorFilter(getColor(R.color.brand_red))
-            tvLabel.text = "Block"
+            tvLabel.text = getString(R.string.block)
         }
     }
 
@@ -184,10 +191,10 @@ class ContactDetailsActivity : AppCompatActivity() {
 
         if (isWhitelisted) {
             ivIcon.setColorFilter(getColor(R.color.verified_green))
-            tvLabel.text = "Verified"
+            tvLabel.text = getString(R.string.verified)
         } else {
             ivIcon.setColorFilter(Color.GRAY)
-            tvLabel.text = "Verify"
+            tvLabel.text = getString(R.string.verify)
         }
     }
 
@@ -219,7 +226,7 @@ class ContactDetailsActivity : AppCompatActivity() {
             setImageResource(R.drawable.ic_whatsapp)
             setColorFilter(getColor(R.color.verified_green))
         }
-        whatsappView.findViewById<TextView>(R.id.tvActionLabel).text = "WhatsApp"
+        whatsappView.findViewById<TextView>(R.id.tvActionLabel).text = getString(R.string.whatsapp)
         whatsappView.setOnClickListener { handleWhatsappClick(number) }
 
         // Block Action
@@ -238,7 +245,7 @@ class ContactDetailsActivity : AppCompatActivity() {
             setImageResource(R.drawable.ic_shield)
             setColorFilter(getColor(R.color.brand_warning))
         }
-        reportView.findViewById<TextView>(R.id.tvActionLabel).text = "Report"
+        reportView.findViewById<TextView>(R.id.tvActionLabel).text = getString(R.string.report)
         reportView.setOnClickListener { showReportConfirmDialog(number, name) }
 
         // Verified Action
@@ -262,7 +269,7 @@ class ContactDetailsActivity : AppCompatActivity() {
                     isWhitelisted = false
                     updateLocalNameCache(cleanNumber, null)
                     revertToDefaultUI(ivProfile)
-                    Toast.makeText(this@ContactDetailsActivity, "Removed from White List", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@ContactDetailsActivity, R.string.removed_from_white_list_short, Toast.LENGTH_SHORT).show()
                 } else {
                     val originalName = name.replace(" - online", "").trim()
                     
@@ -277,9 +284,9 @@ class ContactDetailsActivity : AppCompatActivity() {
                     
                     // Show WITH suffix in UI
                     val uiName = if (originalName == "Unknown" || originalName == number || originalName.isEmpty()) {
-                        "Verified - online"
+                        getString(R.string.verified_online)
                     } else {
-                        "$originalName - online"
+                        getString(R.string.name_online, originalName)
                     }
                     
                     updateLocalNameCache(cleanNumber, uiName)
@@ -292,13 +299,13 @@ class ContactDetailsActivity : AppCompatActivity() {
                         handleUnblock(number)
                     }
                     
-                    Toast.makeText(this@ContactDetailsActivity, "Added to White List", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@ContactDetailsActivity, R.string.added_to_white_list_short, Toast.LENGTH_SHORT).show()
                 }
                 updateVerifiedButtonUI()
                 updateLocalWhitelistCache(cleanNumber, isWhitelisted)
                 
             } catch (e: Exception) {
-                Toast.makeText(this@ContactDetailsActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                FirestoreUi.handleFailure(this@ContactDetailsActivity, e, "ContactDetailsActivity")
             }
         }
     }
@@ -319,7 +326,7 @@ class ContactDetailsActivity : AppCompatActivity() {
             cachedMap.remove(number)
         }
 
-        prefs.edit().putString("names", Gson().toJson(cachedMap)).apply()
+        prefs.edit { putString("names", Gson().toJson(cachedMap)) }
     }
 
     private fun updateLocalWhitelistCache(number: String, isAdding: Boolean) {
@@ -332,7 +339,7 @@ class ContactDetailsActivity : AppCompatActivity() {
             cachedSet.remove(number)
         }
         
-        prefs.edit().putStringSet("white_set", cachedSet).apply()
+        prefs.edit { putStringSet("white_set", cachedSet) }
     }
 
     private fun handleUnblock(number: String) {
@@ -359,9 +366,9 @@ class ContactDetailsActivity : AppCompatActivity() {
                     checkGlobalAndLocalStatus(number, tvName, ivProfile)
                 }
                 
-                Toast.makeText(this@ContactDetailsActivity, "Unblocked", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@ContactDetailsActivity, R.string.unblocked, Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
-                Toast.makeText(this@ContactDetailsActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                FirestoreUi.handleFailure(this@ContactDetailsActivity, e, "ContactDetailsActivity")
             }
         }
     }
@@ -392,28 +399,28 @@ class ContactDetailsActivity : AppCompatActivity() {
 
         AlertDialog.Builder(this)
             .setView(dialogView)
-            .setPositiveButton("Block") { _, _ ->
+            .setPositiveButton(R.string.block_dialog_positive) { _, _ ->
                 val selectedReasons = checkBoxes.filter { it.first.isChecked }.map { it.second }
                 val suggestedNameInput = etSuggestedName.text.toString().trim()
                 val isForMeOnly = cbForMeOnly.isChecked
                 
-                val finalReasons = if (selectedReasons.isEmpty()) listOf("Spam") else selectedReasons
-                val finalName = if (suggestedNameInput.isNotEmpty()) suggestedNameInput else "Spamer"
+                val finalReasons = if (selectedReasons.isEmpty()) listOf(getString(R.string.default_spam_reason)) else selectedReasons
+                val finalName = if (suggestedNameInput.isNotEmpty()) suggestedNameInput else getString(R.string.default_spammer_name)
 
                 handleGlobalReport(number, finalName, finalReasons, isBlock = true, isForMeOnly = isForMeOnly)
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
     private fun showReportConfirmDialog(number: String, name: String) {
         AlertDialog.Builder(this)
-            .setTitle("Report Number")
-            .setMessage("Do you want to report $number?")
-            .setPositiveButton("Report") { _, _ ->
-                handleGlobalReport(number, "Spamer", listOf("Spam"), isBlock = false, isForMeOnly = false)
+            .setTitle(R.string.report_number_title)
+            .setMessage(getString(R.string.report_number_message, number))
+            .setPositiveButton(R.string.report) { _, _ ->
+                handleGlobalReport(number, getString(R.string.default_spammer_name), listOf(getString(R.string.default_spam_reason)), isBlock = false, isForMeOnly = false)
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
@@ -431,7 +438,7 @@ class ContactDetailsActivity : AppCompatActivity() {
                 val reportDoc = globalRef.collection("reports").document(currentUser.uid).get().await()
 
                 if (reportDoc.exists() && !isAdmin) {
-                    Toast.makeText(this@ContactDetailsActivity, "You have already reported this number", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@ContactDetailsActivity, R.string.already_reported, Toast.LENGTH_SHORT).show()
                     if (isBlock) blockLocally(cleanNumber, finalName, reasons)
                     return@launch
                 }
@@ -469,10 +476,10 @@ class ContactDetailsActivity : AppCompatActivity() {
                     }.await()
                 }
 
-                Toast.makeText(this@ContactDetailsActivity, if (isForMeOnly) "Blocked locally" else "Reported successfully", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@ContactDetailsActivity, if (isForMeOnly) getString(R.string.blocked_locally) else getString(R.string.reported_successfully), Toast.LENGTH_SHORT).show()
 
             } catch (e: Exception) {
-                Toast.makeText(this@ContactDetailsActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                FirestoreUi.handleFailure(this@ContactDetailsActivity, e, "ContactDetailsActivity")
             }
         }
     }
@@ -516,7 +523,7 @@ class ContactDetailsActivity : AppCompatActivity() {
             cachedSet.remove(cleanNumber)
         }
         
-        prefs.edit().putStringSet("blocked_set", cachedSet).apply()
+        prefs.edit { putStringSet("blocked_set", cachedSet) }
     }
 
     private fun handleWhatsappClick(number: String) {
@@ -525,7 +532,7 @@ class ContactDetailsActivity : AppCompatActivity() {
         val installedApps = getInstalledWhatsappApps()
         
         if (installedApps.isEmpty()) {
-            Toast.makeText(this, "WhatsApp is not installed", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, R.string.whatsapp_not_installed, Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -540,8 +547,8 @@ class ContactDetailsActivity : AppCompatActivity() {
 
     private fun getInstalledWhatsappApps(): List<WhatsappAppInfo> {
         val apps = mutableListOf<WhatsappAppInfo>()
-        if (isAppInstalled(WHATSAPP_PKG)) apps.add(WhatsappAppInfo("WhatsApp", WHATSAPP_PKG))
-        if (isAppInstalled(WHATSAPP_BUSINESS_PKG)) apps.add(WhatsappAppInfo("WhatsApp Business", WHATSAPP_BUSINESS_PKG))
+        if (isAppInstalled(whatsappPkg)) apps.add(WhatsappAppInfo(getString(R.string.whatsapp), whatsappPkg))
+        if (isAppInstalled(whatsappBusinessPkg)) apps.add(WhatsappAppInfo("WhatsApp Business", whatsappBusinessPkg))
         return apps
     }
 
@@ -559,34 +566,32 @@ class ContactDetailsActivity : AppCompatActivity() {
         var selectedIdx = 0
         
         AlertDialog.Builder(this)
-            .setTitle("Select WhatsApp Version")
+            .setTitle(R.string.select_whatsapp_version)
             .setSingleChoiceItems(names, 0) { _, which ->
                 selectedIdx = which
             }
-            .setPositiveButton("Open") { _, _ ->
+            .setPositiveButton(R.string.open) { _, _ ->
                 openWhatsapp(number, apps[selectedIdx].packageName)
             }
-            .setNeutralButton("Always Use This") { _, _ ->
+            .setNeutralButton(R.string.always_use_this) { _, _ ->
                 getSharedPreferences("AppSettings", Context.MODE_PRIVATE)
-                    .edit()
-                    .putString("default_whatsapp_pkg", apps[selectedIdx].packageName)
-                    .apply()
+                    .edit { putString("default_whatsapp_pkg", apps[selectedIdx].packageName) }
                 openWhatsapp(number, apps[selectedIdx].packageName)
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
     private fun openWhatsapp(number: String, packageName: String) {
         val cleanNumber = number.replace("[^0-9]".toRegex(), "")
-        val uri = Uri.parse("https://api.whatsapp.com/send?phone=$cleanNumber")
+        val uri = "https://api.whatsapp.com/send?phone=$cleanNumber".toUri()
         val intent = Intent(Intent.ACTION_VIEW, uri).apply {
             setPackage(packageName)
         }
         try {
             startActivity(intent)
         } catch (e: Exception) {
-            Toast.makeText(this, "Could not open WhatsApp", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, R.string.could_not_open_whatsapp, Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -705,8 +710,8 @@ class ContactDetailsActivity : AppCompatActivity() {
 
     private fun getGroupDate(timestamp: Long): String {
         return when {
-            DateUtils.isToday(timestamp) -> "Today"
-            DateUtils.isToday(timestamp + DateUtils.DAY_IN_MILLIS) -> "Yesterday"
+            DateUtils.isToday(timestamp) -> getString(R.string.detail_group_today)
+            DateUtils.isToday(timestamp + DateUtils.DAY_IN_MILLIS) -> getString(R.string.yesterday)
             else -> SimpleDateFormat("EEEE, dd MMM", Locale.getDefault()).format(Date(timestamp))
         }
     }

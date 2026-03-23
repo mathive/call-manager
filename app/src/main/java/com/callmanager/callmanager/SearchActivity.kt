@@ -75,6 +75,11 @@ class SearchActivity : AppCompatActivity() {
         imm.showSoftInput(etSearch, InputMethodManager.SHOW_IMPLICIT)
     }
 
+    override fun onResume() {
+        super.onResume()
+        FirestoreUi.showPendingMessageIfAny(this)
+    }
+
     private fun fetchAdminStatus() {
         val uid = auth.currentUser?.uid ?: return
         db.collection("users").document(uid).get().addOnSuccessListener { doc ->
@@ -173,7 +178,7 @@ class SearchActivity : AppCompatActivity() {
         }
         
         if (shouldShowRemoteAction) {
-            tvRemoteSearchLabel.text = "Search \"$query\" on Call Manager"
+            tvRemoteSearchLabel.text = getString(R.string.remote_search_prompt, query)
             llRemoteSearchAction.visibility = View.VISIBLE
             tvRemoteHeader.visibility = View.VISIBLE
             
@@ -227,7 +232,7 @@ class SearchActivity : AppCompatActivity() {
         withContext(Dispatchers.Main) {
             localResults.clear()
             localResults.addAll(results)
-            localAdapter?.notifyDataSetChanged()
+            localAdapter?.updateData(results)
             
             tvContactsHeader.visibility = if (results.isNotEmpty()) View.VISIBLE else View.GONE
             btnShowMore.visibility = if (results.size >= 5 && !isShowingAllLocal) View.VISIBLE else View.GONE
@@ -245,7 +250,7 @@ class SearchActivity : AppCompatActivity() {
 
         // Final security check
         if (!isAdmin && (!isNumberQuery || !isFullNumber)) {
-            Toast.makeText(this, "Valid 10-digit number required for global search", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, R.string.valid_ten_digit_required, Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -254,7 +259,7 @@ class SearchActivity : AppCompatActivity() {
         llRemoteSearchAction.isEnabled = false
         
         remoteResults.clear()
-        remoteAdapter?.notifyDataSetChanged()
+        remoteAdapter?.updateData(emptyList())
 
         remoteSearchJob = lifecycleScope.launch {
             val results = withContext(Dispatchers.IO) {
@@ -338,6 +343,9 @@ class SearchActivity : AppCompatActivity() {
 
                 } catch (e: Exception) {
                     Log.e("SearchActivity", "Firestore search error", e)
+                    withContext(Dispatchers.Main) {
+                        FirestoreUi.handleFailure(this@SearchActivity, e, "SearchActivity")
+                    }
                 }
                 
                 list.distinctBy { it.number.replace("[^0-9+]".toRegex(), "") }
@@ -350,12 +358,12 @@ class SearchActivity : AppCompatActivity() {
 
                 remoteResults.clear()
                 remoteResults.addAll(results)
-                remoteAdapter?.notifyDataSetChanged()
+                remoteAdapter?.updateData(results)
                 
                 if (results.isEmpty()) {
                     llRemoteSearchAction.visibility = View.VISIBLE
                     tvRemoteHeader.visibility = View.VISIBLE
-                    Toast.makeText(this@SearchActivity, "No matches found in Call Manager", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@SearchActivity, R.string.no_matches_found, Toast.LENGTH_SHORT).show()
                 } else {
                     llRemoteSearchAction.visibility = View.GONE
                     tvRemoteHeader.visibility = View.VISIBLE
@@ -383,9 +391,9 @@ class SearchActivity : AppCompatActivity() {
 
     private fun clearResults() {
         localResults.clear()
-        localAdapter?.notifyDataSetChanged()
+        localAdapter?.updateData(emptyList())
         remoteResults.clear()
-        remoteAdapter?.notifyDataSetChanged()
+        remoteAdapter?.updateData(emptyList())
         
         tvContactsHeader.visibility = View.GONE
         tvRemoteHeader.visibility = View.GONE

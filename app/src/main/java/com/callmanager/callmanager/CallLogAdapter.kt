@@ -10,6 +10,8 @@ import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.TextView
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.toColorInt
+import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 import com.bumptech.glide.Glide
 import com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions
@@ -30,9 +32,10 @@ data class CallLogItem(
     var isWhitelisted: Boolean = false
 )
 
-class CallLogAdapter(private val callLogs: List<CallLogItem>) :
+class CallLogAdapter(callLogs: List<CallLogItem>) :
     RecyclerView.Adapter<CallLogAdapter.ViewHolder>() {
 
+    private val callLogs = callLogs.toMutableList()
     private val bgColors = arrayOf("#F44336", "#E91E63", "#9C27B0", "#673AB7", "#3F51B5", "#2196F3", "#009688", "#4CAF50", "#FF9800", "#FF5722")
 
     class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
@@ -119,7 +122,7 @@ class CallLogAdapter(private val callLogs: List<CallLogItem>) :
 
     private fun setWhiteTextUI(holder: ViewHolder) {
         holder.tvName.setTextColor(Color.WHITE)
-        val lightGray = Color.parseColor("#EEEEEE")
+        val lightGray = "#EEEEEE".toColorInt()
         holder.tvNumber.setTextColor(lightGray)
         holder.tvTime.setTextColor(lightGray)
         holder.tvSimLabel.setTextColor(Color.WHITE)
@@ -144,7 +147,7 @@ class CallLogAdapter(private val callLogs: List<CallLogItem>) :
             holder.ivUnknownIcon.visibility = View.VISIBLE
         } else if (item.isBlockedLocally || item.isGlobalSpam) {
             holder.ivProfileBg.visibility = View.VISIBLE
-            holder.ivProfileBg.setBackgroundColor(Color.parseColor("#E74C3C")) // Red circle
+            holder.ivProfileBg.setBackgroundColor("#E74C3C".toColorInt()) // Red circle
             
             // Add white border only if the row background is also red (Personal Block)
             if (item.isBlockedLocally) {
@@ -167,7 +170,7 @@ class CallLogAdapter(private val callLogs: List<CallLogItem>) :
             val nameToUse = if (!item.dbName.isNullOrEmpty()) item.dbName!! else item.name
             val colorIndex = Math.abs(nameToUse.hashCode() % bgColors.size)
             holder.ivProfileBg.visibility = View.VISIBLE
-            holder.ivProfileBg.setBackgroundColor(Color.parseColor(bgColors[colorIndex]))
+            holder.ivProfileBg.setBackgroundColor(bgColors[colorIndex].toColorInt())
             holder.tvInitials.visibility = View.VISIBLE
             holder.tvInitials.text = getInitials(nameToUse)
         } else {
@@ -186,7 +189,7 @@ class CallLogAdapter(private val callLogs: List<CallLogItem>) :
             "Missed" -> "#E74C3C"
             else -> "#757575"
         }
-        holder.ivCallType.imageTintList = ColorStateList.valueOf(Color.parseColor(color))
+        holder.ivCallType.imageTintList = ColorStateList.valueOf(color.toColorInt())
 
         val icon = when (type) {
             "Incoming" -> R.drawable.ic_call_incoming
@@ -212,6 +215,31 @@ class CallLogAdapter(private val callLogs: List<CallLogItem>) :
         } else if (parts.isNotEmpty()) {
             parts[0][0].toString().uppercase()
         } else "?"
+    }
+
+    fun updateData(newItems: List<CallLogItem>) {
+        val oldItems = callLogs.toList()
+        val diffResult = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+            override fun getOldListSize() = oldItems.size
+
+            override fun getNewListSize() = newItems.size
+
+            override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean {
+                val oldItem = oldItems[oldItemPosition]
+                val newItem = newItems[newItemPosition]
+                return oldItem.number == newItem.number &&
+                    oldItem.time == newItem.time &&
+                    oldItem.type == newItem.type
+            }
+
+            override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean {
+                return oldItems[oldItemPosition] == newItems[newItemPosition]
+            }
+        })
+
+        callLogs.clear()
+        callLogs.addAll(newItems)
+        diffResult.dispatchUpdatesTo(this)
     }
 
     override fun getItemCount() = callLogs.size

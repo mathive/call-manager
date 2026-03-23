@@ -14,6 +14,7 @@ import android.view.View
 import android.view.WindowManager
 import android.view.animation.AlphaAnimation
 import android.view.animation.Animation
+import android.widget.FrameLayout
 
 class EdgeGlowService : Service() {
 
@@ -46,7 +47,7 @@ class EdgeGlowService : Service() {
         val inflater = LayoutInflater.from(this)
         
         // Inflate the full screen layout
-        glowView = inflater.inflate(R.layout.layout_edge_glow, null)
+        glowView = inflater.inflate(R.layout.layout_edge_glow, FrameLayout(this), false)
 
         val layoutParams = WindowManager.LayoutParams().apply {
             width = WindowManager.LayoutParams.MATCH_PARENT

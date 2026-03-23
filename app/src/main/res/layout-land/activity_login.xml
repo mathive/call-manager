@@ -14,7 +14,7 @@
             android:id="@+id/tvHeading"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Welcome to\nCall Manager"
+            android:text="@string/welcome_heading"
             android:textColor="@color/text_primary"
             android:textSize="32sp"
             android:textStyle="bold"
@@ -40,7 +40,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Sign in with Google to continue"
+                android:text="@string/sign_in_continue"
                 android:textColor="@color/text_primary"
                 android:textSize="16sp" />
 

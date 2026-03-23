@@ -60,6 +60,11 @@ class LoginActivity : AppCompatActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        FirestoreUi.showPendingMessageIfAny(this)
+    }
+
     private fun handleSignInClick() {
         val ungrantedPermissions = getUngrantedPermissions()
         if (ungrantedPermissions.isEmpty()) {
@@ -81,26 +86,26 @@ class LoginActivity : AppCompatActivity() {
 
     private fun showPermissionDialog() {
         AlertDialog.Builder(this)
-            .setTitle("Permissions Required")
-            .setMessage("This app needs Call Log and Contacts permissions to function. Please grant them to continue.")
-            .setPositiveButton("Grant") { _, _ ->
+            .setTitle(R.string.permission_required_title)
+            .setMessage(R.string.permission_required_message)
+            .setPositiveButton(R.string.enable) { _, _ ->
                 requestPermissionLauncher.launch(getUngrantedPermissions().toTypedArray())
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
     private fun showSettingsDialog() {
         AlertDialog.Builder(this)
-            .setTitle("Permissions Permanently Denied")
-            .setMessage("You have permanently denied some permissions. Please enable them from Settings to sign in.")
-            .setPositiveButton("Settings") { _, _ ->
+            .setTitle(R.string.permission_denied_permanent_title)
+            .setMessage(R.string.permission_denied_permanent_message)
+            .setPositiveButton(R.string.settings_label) { _, _ ->
                 val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
                     data = Uri.fromParts("package", packageName, null)
                 }
                 startActivity(intent)
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
@@ -115,7 +120,7 @@ class LoginActivity : AppCompatActivity() {
     ) { permissions ->
         val allGranted = permissions.entries.all { it.value }
         if (allGranted) {
-            Toast.makeText(this, "Permissions Granted", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, R.string.permissions_granted, Toast.LENGTH_SHORT).show()
         } else {
             // If user denied with "Don't ask again", show settings dialog
             val stillUngranted = getUngrantedPermissions()
@@ -126,7 +131,7 @@ class LoginActivity : AppCompatActivity() {
             if (deniedPermanently) {
                 showSettingsDialog()
             } else {
-                Toast.makeText(this, "All permissions are required to use this app", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, R.string.permissions_required_all, Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -143,7 +148,7 @@ class LoginActivity : AppCompatActivity() {
                 val account = task.getResult(ApiException::class.java)!!
                 firebaseAuthWithGoogle(account.idToken!!)
             } catch (e: ApiException) {
-                Toast.makeText(this, "Google sign in failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.google_sign_in_failed, e.message ?: ""), Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -170,13 +175,19 @@ class LoginActivity : AppCompatActivity() {
                                         .addOnSuccessListener {
                                             navigateToMain()
                                         }
+                                        .addOnFailureListener { e ->
+                                            FirestoreUi.handleFailure(this, e, "LoginActivity")
+                                        }
                                 } else {
                                     navigateToMain()
                                 }
                             }
+                            .addOnFailureListener { e ->
+                                FirestoreUi.handleFailure(this, e, "LoginActivity")
+                            }
                     }
                 } else {
-                    Toast.makeText(this, "Authentication Failed.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, R.string.authentication_failed, Toast.LENGTH_SHORT).show()
                 }
             }
     }

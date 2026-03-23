@@ -8,7 +8,7 @@
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Select reason for blocking"
+        android:text="@string/select_block_reason"
         android:textColor="@color/black"
         android:textSize="20sp"
         android:textStyle="bold"
@@ -18,7 +18,7 @@
         android:id="@+id/cbSpam"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Spam"
+        android:text="@string/reason_spam"
         android:textSize="16sp"
         android:padding="8dp"/>
 
@@ -26,7 +26,7 @@
         android:id="@+id/cbHarassment"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Harassment"
+        android:text="@string/reason_harassment"
         android:textSize="16sp"
         android:padding="8dp"/>
 
@@ -34,7 +34,7 @@
         android:id="@+id/cbFraud"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Fraud calls"
+        android:text="@string/reason_fraud_calls"
         android:textSize="16sp"
         android:padding="8dp"/>
 
@@ -42,7 +42,7 @@
         android:id="@+id/cbOffensive"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Offensive"
+        android:text="@string/reason_offensive"
         android:textSize="16sp"
         android:padding="8dp"/>
 
@@ -50,7 +50,7 @@
         android:id="@+id/cbAbusing"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Abusing"
+        android:text="@string/reason_abusing"
         android:textSize="16sp"
         android:padding="8dp"/>
 
@@ -58,7 +58,7 @@
         android:id="@+id/cbTelemarketing"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Telemarketing"
+        android:text="@string/reason_telemarketing"
         android:textSize="16sp"
         android:padding="8dp"/>
 
@@ -66,7 +66,7 @@
         android:id="@+id/cbOther"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Other"
+        android:text="@string/reason_other"
         android:textSize="16sp"
         android:padding="8dp"/>
 
@@ -74,7 +74,7 @@
         android:id="@+id/cbForMeOnly"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="For me only"
+        android:text="@string/reason_me_only"
         android:textSize="16sp"
         android:padding="8dp"
         android:textColor="@color/brand_red"/>
@@ -85,7 +85,8 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
         android:background="@drawable/bg_edittext"
-        android:hint="Suggest name (optional)"
+        android:hint="@string/suggest_name_optional"
+        android:inputType="textPersonName"
         android:padding="12dp"
         android:textSize="16sp" />
 

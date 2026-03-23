@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
-    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:paddingVertical="12dp"
@@ -11,6 +10,7 @@
         android:id="@+id/ivCallType"
         android:layout_width="18dp"
         android:layout_height="18dp"
+        android:contentDescription="@string/cd_call_type"
         android:src="@drawable/ic_call_incoming"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="@+id/tvCallTime"
@@ -22,7 +22,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginStart="16dp"
-        android:text="7:58 am"
+        android:text="@string/detail_time_placeholder"
         android:textColor="@color/text_primary"
         android:textSize="18sp"
         app:layout_constraintStart_toEndOf="@id/ivCallType"
@@ -45,9 +45,9 @@
             android:layout_height="wrap_content"
             android:background="@drawable/bg_sim_label"
             android:paddingHorizontal="4dp"
-            android:text="2"
+            android:text="@string/detail_sim_placeholder"
             android:textColor="@color/text_secondary"
-            android:textSize="10sp"
+            android:textSize="11sp"
             android:textStyle="bold" />
 
         <TextView
@@ -55,7 +55,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginStart="8dp"
-            android:text="Outgoing"
+            android:text="@string/detail_call_type_placeholder"
             android:textColor="@color/text_secondary"
             android:textSize="13sp" />
 
@@ -63,7 +63,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginStart="4dp"
-            android:text="•"
+            android:text="@string/detail_separator"
             android:textColor="@color/text_secondary"
             android:textSize="13sp" />
 
@@ -72,7 +72,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginStart="4dp"
-            android:text="+919322981312"
+            android:text="@string/detail_phone_placeholder"
             android:textColor="@color/text_secondary"
             android:textSize="13sp" />
     </LinearLayout>
@@ -81,7 +81,7 @@
         android:id="@+id/tvDuration"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="17m 12s"
+        android:text="@string/detail_duration_placeholder"
         android:textColor="@color/text_secondary"
         android:textSize="13sp"
         app:layout_constraintBottom_toBottomOf="parent"

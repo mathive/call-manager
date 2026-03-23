@@ -19,7 +19,8 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:background="@null"
-            android:hint="Search"
+            android:hint="@string/search_hint"
+            android:importantForAutofill="no"
             android:imeOptions="actionSearch"
             android:inputType="text"
             android:textColor="@color/white"
@@ -45,7 +46,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:padding="16dp"
-                android:text="Contacts"
+                android:text="@string/contacts_header"
                 android:textColor="@color/text_secondary"
                 android:textSize="14sp"
                 android:visibility="gone" />
@@ -61,7 +62,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:padding="16dp"
-                android:text="SHOW MORE"
+                android:text="@string/show_more"
                 android:textColor="@color/outgoing_blue"
                 android:textSize="14sp"
                 android:textStyle="bold"
@@ -80,7 +81,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:padding="16dp"
-                android:text="Call Manager"
+                android:text="@string/remote_header"
                 android:textColor="@color/text_secondary"
                 android:textSize="14sp"
                 android:visibility="gone" />
@@ -102,6 +103,7 @@
                     android:layout_height="40dp"
                     android:background="@drawable/bg_sim_label"
                     android:backgroundTint="@color/outgoing_blue"
+                    android:contentDescription="@string/cd_remote_search"
                     android:padding="8dp"
                     android:src="@drawable/ic_search"
                     app:tint="@color/white" />
@@ -118,7 +120,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginStart="16dp"
-                    android:text="Search on Call Manager"
+                    android:text="@string/remote_search_default"
                     android:textColor="@color/outgoing_blue"
                     android:textSize="16sp" />
             </LinearLayout>

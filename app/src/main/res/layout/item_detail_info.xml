@@ -11,6 +11,7 @@
         android:layout_width="24dp"
         android:layout_height="24dp"
         android:layout_centerVertical="true"
+        android:contentDescription="@string/cd_info"
         android:src="@drawable/ic_search"
         app:tint="@color/white" />
 
@@ -21,7 +22,7 @@
         android:layout_centerVertical="true"
         android:layout_marginStart="16dp"
         android:layout_toEndOf="@id/ivInfoIcon"
-        android:text="Value"
+        android:text="@string/detail_value_placeholder"
         android:textColor="@color/white"
         android:textSize="16sp" />
 

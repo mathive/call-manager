@@ -117,9 +117,7 @@ class NotificationBlockerService : NotificationListenerService() {
                     cancelNotification(sbn.key)
 
                     // For some devices, we need to cancel by tag/id as well
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
-                        cancelAllNotifications() // Aggressive
-                    }
+                    cancelAllNotifications() // Aggressive
                 }
             }
         }

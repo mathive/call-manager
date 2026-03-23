@@ -2,13 +2,14 @@ package com.callmanager.callmanager
 
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
+import androidx.core.content.edit
+import androidx.core.net.toUri
 import com.bumptech.glide.Glide
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.imageview.ShapeableImageView
@@ -51,14 +52,14 @@ class ProfileActivity : AppCompatActivity() {
         swEdgeGlow.isChecked = prefs.getBoolean("edge_glow_enabled", false)
 
         swBlockUnknown.setOnCheckedChangeListener { _, isChecked ->
-            prefs.edit().putBoolean("block_all_unknown", isChecked).apply()
-            val message = if (isChecked) "Blocking all unknown calls" else "Block unknown disabled"
+            prefs.edit { putBoolean("block_all_unknown", isChecked) }
+            val message = if (isChecked) getString(R.string.blocking_all_unknown_calls) else getString(R.string.block_unknown_disabled)
             Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
         }
 
         swBlockWhatsappUnknown.setOnCheckedChangeListener { _, isChecked ->
-            prefs.edit().putBoolean("block_whatsapp_unknown", isChecked).apply()
-            val message = if (isChecked) "Blocking unknown WhatsApp calls" else "Block WhatsApp unknown disabled"
+            prefs.edit { putBoolean("block_whatsapp_unknown", isChecked) }
+            val message = if (isChecked) getString(R.string.blocking_unknown_whatsapp_calls) else getString(R.string.block_whatsapp_unknown_disabled)
             Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
             
             if (isChecked && !isNotificationServiceEnabled()) {
@@ -67,8 +68,8 @@ class ProfileActivity : AppCompatActivity() {
         }
 
         swEdgeGlow.setOnCheckedChangeListener { _, isChecked ->
-            prefs.edit().putBoolean("edge_glow_enabled", isChecked).apply()
-            val message = if (isChecked) "Edge glow alert enabled" else "Edge glow alert disabled"
+            prefs.edit { putBoolean("edge_glow_enabled", isChecked) }
+            val message = if (isChecked) getString(R.string.edge_glow_alert_enabled) else getString(R.string.edge_glow_alert_disabled)
             Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
 
             if (isChecked && !Settings.canDrawOverlays(this)) {
@@ -87,14 +88,22 @@ class ProfileActivity : AppCompatActivity() {
             .addOnSuccessListener { document ->
                 if (document != null && document.exists()) {
                     val fullName = document.getString("fullName") ?: "User"
-                    val mobileNumber = document.getString("mobileNumber") ?: "Not provided"
+                    val mobileNumber = document.getString("mobileNumber") ?: getString(R.string.not_provided)
                     val email = document.getString("email") ?: currentUser.email ?: ""
                     val role = document.getString("role") ?: "Guest"
+
+                    getSharedPreferences("UserProfileCache", Context.MODE_PRIVATE).edit {
+                        putString("uid", currentUser.uid)
+                        putString("fullName", fullName)
+                        putString("email", email)
+                        putString("mobileNumber", if (mobileNumber == getString(R.string.not_provided)) "" else mobileNumber)
+                        putString("role", role)
+                    }
 
                     tvName.text = fullName
                     tvPhone.text = mobileNumber
                     tvEmail.text = email
-                    tvStatus.text = if (role == "Admin") "Administrator" else "Verified User"
+                    tvStatus.text = if (role == "Admin") getString(R.string.administrator) else getString(R.string.verified_user)
 
                     // Use Google Profile pic if available
                     val photoUrl = currentUser.photoUrl
@@ -107,16 +116,22 @@ class ProfileActivity : AppCompatActivity() {
                 }
             }
             .addOnFailureListener { e ->
-                Toast.makeText(this, "Failed to load profile: ${e.message}", Toast.LENGTH_SHORT).show()
+                FirestoreUi.handleFailure(this, e, "ProfileActivity")
             }
 
         btnLogout.setOnClickListener {
             auth.signOut()
+            getSharedPreferences("UserProfileCache", Context.MODE_PRIVATE).edit { clear() }
             val intent = Intent(this, LoginActivity::class.java)
             intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
             startActivity(intent)
             finish()
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        FirestoreUi.showPendingMessageIfAny(this)
     }
 
     private fun isNotificationServiceEnabled(): Boolean {
@@ -138,24 +153,24 @@ class ProfileActivity : AppCompatActivity() {
 
     private fun showNotificationPermissionDialog() {
         androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("Permission Required")
-            .setMessage("To block WhatsApp calls, this app needs Notification Access. Please enable it in the next screen.")
-            .setPositiveButton("Enable") { _, _ ->
+            .setTitle(R.string.notification_permission_title)
+            .setMessage(R.string.notification_permission_message)
+            .setPositiveButton(R.string.enable) { _, _ ->
                 startActivity(Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"))
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
     private fun showOverlayPermissionDialog() {
         androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("Permission Required")
-            .setMessage("Edge glow alert requires 'Display over other apps' permission to show the visual alert. Please enable it in settings.")
-            .setPositiveButton("Enable") { _, _ ->
-                val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+            .setTitle(R.string.notification_permission_title)
+            .setMessage(R.string.overlay_permission_message)
+            .setPositiveButton(R.string.enable) { _, _ ->
+                val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, "package:$packageName".toUri())
                 startActivity(intent)
             }
-            .setNegativeButton("Cancel") { _, _ ->
+            .setNegativeButton(R.string.cancel) { _, _ ->
                 findViewById<SwitchMaterial>(R.id.swEdgeGlow).isChecked = false
             }
             .show()

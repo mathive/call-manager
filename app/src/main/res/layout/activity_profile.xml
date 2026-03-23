@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
-    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/bg_main"
@@ -46,6 +45,7 @@
                 android:layout_width="120dp"
                 android:layout_height="120dp"
                 android:background="@color/brand_black"
+                android:contentDescription="@string/cd_profile_icon"
                 android:padding="2dp"
                 android:src="@drawable/ic_person"
                 app:shapeAppearanceOverlay="@style/ShapeAppearanceOverlay.App.Circle"
@@ -63,7 +63,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="16dp"
-                android:text="contact name"
+                android:text="@string/contact_name_placeholder"
                 android:textColor="@color/white"
                 android:textSize="26sp"
                 android:textStyle="bold"
@@ -91,7 +91,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Phone Number"
+                        android:text="@string/phone_number_label"
                         android:textColor="@color/text_secondary"
                         android:textSize="12sp" />
 
@@ -100,7 +100,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
-                        android:text="+91 0000000000"
+                        android:text="@string/profile_phone_placeholder"
                         android:textColor="@color/brand_black"
                         android:textSize="16sp"
                         android:textStyle="bold" />
@@ -114,7 +114,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Email Address"
+                        android:text="@string/email_address_label"
                         android:textColor="@color/text_secondary"
                         android:textSize="12sp" />
 
@@ -123,7 +123,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
-                        android:text="user@example.com"
+                        android:text="@string/profile_email_placeholder"
                         android:textColor="@color/brand_black"
                         android:textSize="16sp"
                         android:textStyle="bold" />
@@ -137,7 +137,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Account Status"
+                        android:text="@string/account_status_label"
                         android:textColor="@color/text_secondary"
                         android:textSize="12sp" />
 
@@ -146,7 +146,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
-                        android:text="Verified User"
+                        android:text="@string/verified_user"
                         android:textColor="@color/verified_green"
                         android:textSize="16sp"
                         android:textStyle="bold" />
@@ -161,7 +161,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginStart="20dp"
                 android:layout_marginTop="24dp"
-                android:text="Settings"
+                android:text="@string/settings_label"
                 android:textColor="@color/brand_black"
                 android:textSize="18sp"
                 android:textStyle="bold"
@@ -195,7 +195,7 @@
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
                             android:layout_weight="1"
-                            android:text="Block all unknown"
+                            android:text="@string/block_all_unknown"
                             android:textColor="@color/brand_black"
                             android:textSize="16sp" />
 
@@ -225,7 +225,7 @@
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
                             android:layout_weight="1"
-                            android:text="Block unknown WhatsApp calls"
+                            android:text="@string/block_unknown_whatsapp"
                             android:textColor="@color/brand_black"
                             android:textSize="16sp" />
 
@@ -255,7 +255,7 @@
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
                             android:layout_weight="1"
-                            android:text="Edge glow alert"
+                            android:text="@string/edge_glow_alert"
                             android:textColor="@color/brand_black"
                             android:textSize="16sp" />
 
@@ -279,7 +279,7 @@
         android:layout_width="match_parent"
         android:layout_height="56dp"
         android:layout_margin="24dp"
-        android:text="Logout"
+        android:text="@string/logout"
         android:textColor="@color/white"
         app:backgroundTint="@color/brand_red"
         app:cornerRadius="28dp"

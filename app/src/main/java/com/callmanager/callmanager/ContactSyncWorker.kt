@@ -8,11 +8,13 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.provider.ContactsContract
 import androidx.core.app.NotificationCompat
+import androidx.core.content.edit
 import androidx.core.content.ContextCompat
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.tasks.await
 import java.security.MessageDigest
 
@@ -63,7 +65,7 @@ class ContactSyncWorker(context: Context, params: WorkerParameters) : CoroutineW
             }
             
             // 5. Success Handling
-            prefs.edit().putString("last_contact_hash", currentHash).apply()
+            prefs.edit { putString("last_contact_hash", currentHash) }
             
             // Clear any error notifications
             val notificationManager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -72,7 +74,12 @@ class ContactSyncWorker(context: Context, params: WorkerParameters) : CoroutineW
             Result.success()
         } catch (e: Exception) {
             // 6. Error Handling with Notification
-            showSyncNotification("Sync paused", "We'll resume syncing your contacts soon.")
+            FirestoreUi.handleFailure(applicationContext, e, "ContactSyncWorker")
+            if (e is FirebaseFirestoreException && e.code == FirebaseFirestoreException.Code.RESOURCE_EXHAUSTED) {
+                showSyncNotification("Sync unavailable", "System is under maintenance. Please try later.")
+            } else {
+                showSyncNotification("Sync paused", "System is busy. Please try later.")
+            }
             Result.retry() // WorkManager will automatically retry later
         }
     }
@@ -93,12 +100,13 @@ class ContactSyncWorker(context: Context, params: WorkerParameters) : CoroutineW
             while (cursor.moveToNext()) {
                 val name = cursor.getString(nameIdx) ?: "Unknown"
                 val number = cursor.getString(numIdx) ?: ""
+                val normalizedNumber = normalizeNumber(number)
                 
-                // Only include contacts with valid phone numbers
-                if (number.isNotBlank() && isValidPhoneNumber(number)) {
+                // Sync only valid mobile numbers and keep a normalized key for fast lookups.
+                if (normalizedNumber.isNotBlank() && isValidPhoneNumber(normalizedNumber)) {
                     contactList.add(mapOf(
                         "name" to name.trim(),
-                        "number" to number.trim()
+                        "number" to normalizedNumber
                     ))
                 }
             }
@@ -108,9 +116,17 @@ class ContactSyncWorker(context: Context, params: WorkerParameters) : CoroutineW
     }
 
     private fun isValidPhoneNumber(number: String): Boolean {
-        // Simple check: must have at least 7 digits to be considered a real phone number
+        return number.length == 12 && number.startsWith("91") && number.substring(2).all { it.isDigit() }
+    }
+
+    private fun normalizeNumber(number: String): String {
         val digitsOnly = number.replace("[^0-9]".toRegex(), "")
-        return digitsOnly.length >= 7
+        return when {
+            digitsOnly.length == 10 -> "91$digitsOnly"
+            digitsOnly.length == 11 && digitsOnly.startsWith("0") -> "91${digitsOnly.substring(1)}"
+            digitsOnly.length == 12 && digitsOnly.startsWith("91") -> digitsOnly
+            else -> ""
+        }
     }
 
     private fun calculateHash(contacts: List<Map<String, Any>>): String {
