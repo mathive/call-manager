@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg_main">
+
+    <!-- Top Header Background - BLACK PATCH -->
+    <View
+        android:id="@+id/detailHeader"
+        android:layout_width="match_parent"
+        android:layout_height="200dp"
+        android:background="@color/brand_black"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- Custom Toolbar -->
+    <androidx.appcompat.widget.Toolbar
+        android:id="@+id/toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        app:layout_constraintTop_toTopOf="parent"
+        app:navigationIcon="@drawable/ic_back">
+
+        <TextView
+            android:id="@+id/tvInContactsLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:text="IN YOUR CONTACTS"
+            android:textColor="@color/white"
+            android:textSize="12sp"
+            android:letterSpacing="0.1"
+            android:textStyle="bold"
+            android:visibility="gone"
+            tools:visibility="visible" />
+
+    </androidx.appcompat.widget.Toolbar>
+
+    <!-- Profile Image Centered in Header Patch -->
+    <FrameLayout
+        android:id="@+id/profileContainer"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        app:layout_constraintBottom_toBottomOf="@id/detailHeader"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="@id/detailHeader">
+
+        <com.google.android.material.imageview.ShapeableImageView
+            android:id="@+id/ivDetailProfile"
+            android:layout_width="100dp"
+            android:layout_height="100dp"
+            android:background="@color/brand_black"
+            android:padding="2dp"
+            android:src="@drawable/ic_person"
+            app:shapeAppearanceOverlay="@style/ShapeAppearanceOverlay.App.Circle"
+            app:strokeColor="@color/white"
+            app:strokeWidth="3dp" />
+
+    </FrameLayout>
+
+    <!-- Contact Name at Red Patch Bottom -->
+    <TextView
+        android:id="@+id/tvDetailName"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        android:text="Contact Name"
+        android:textColor="@color/white"
+        android:textSize="22sp"
+        android:textStyle="bold"
+        app:layout_constraintBottom_toBottomOf="@id/detailHeader"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <!-- Sticky Action Buttons Row with Shadow -->
+    <LinearLayout
+        android:id="@+id/stickyActionsLayout"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/white"
+        android:elevation="6dp"
+        android:orientation="horizontal"
+        android:paddingHorizontal="16dp"
+        android:paddingVertical="16dp"
+        app:layout_constraintTop_toBottomOf="@id/detailHeader">
+
+        <include
+            android:id="@+id/actionWhatsapp"
+            layout="@layout/item_detail_action" />
+
+        <include
+            android:id="@+id/actionBlock"
+            layout="@layout/item_detail_action" />
+
+        <include
+            android:id="@+id/actionReport"
+            layout="@layout/item_detail_action" />
+
+        <include
+            android:id="@+id/actionVerified"
+            layout="@layout/item_detail_action" />
+    </LinearLayout>
+
+    <!-- Scrollable Call History -->
+    <androidx.core.widget.NestedScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:fillViewport="true"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/stickyActionsLayout">
+
+        <LinearLayout
+            android:id="@+id/llCallHistoryContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingBottom="32dp" />
+
+    </androidx.core.widget.NestedScrollView>
+
+</androidx.constraintlayout.widget.ConstraintLayout>

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Brand Colors -->
+    <color name="brand_red">#870501</color>
+    <color name="brand_black">#000000</color>
+    <color name="brand_white">#FFFFFF</color>
+    <color name="brand_warning">#FF5722</color>
+
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <!-- UI Colors updated to Main Brand Colors -->
+    <color name="header_bg">@color/brand_black</color>
+    <color name="search_bg">@color/brand_white</color>
+    <color name="category_icon_bg">#F5F5F5</color>
+    <color name="category_icon_selected">@color/brand_red</color>
+    <color name="list_item_bg">@color/brand_white</color>
+    <color name="bg_main">#FAFAFA</color>
+    <color name="text_secondary">#757575</color>
+    <color name="spam_red">#D32F2F</color>
+    <color name="verified_green">#388E3C</color>
+    <color name="outgoing_blue">#2196F3</color>
+
+    <!-- Dynamic Colors -->
+    <color name="text_primary">@color/brand_black</color>
+    <color name="bg_edittext">@color/brand_white</color>
+    <color name="stroke_edittext">#CCCCCC</color>
+    <color name="link_color">@color/brand_red</color>
+</resources>

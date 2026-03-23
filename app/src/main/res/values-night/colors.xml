@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="text_primary">#FFFFFF</color>
+    <color name="bg_edittext">#1A1A1A</color>
+    <color name="stroke_edittext">#333333</color>
+    <color name="link_color">#FF5252</color>
+</resources>
