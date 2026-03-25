@@ -17,6 +17,7 @@ import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 import com.bumptech.glide.Glide
 import com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions
+import com.google.android.material.progressindicator.CircularProgressIndicator
 import com.google.android.material.imageview.ShapeableImageView
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -41,7 +42,7 @@ class CallLogAdapter(callLogs: List<CallLogItem>) :
         val ivProfileBg: ShapeableImageView = view.findViewById(R.id.ivProfileBg)
         val tvInitials: TextView = view.findViewById(R.id.tvInitials)
         val ivUnknownIcon: ImageView = view.findViewById(R.id.ivUnknownIcon)
-        val progressLookup: ProgressBar = view.findViewById(R.id.progressLookup)
+        val progressLookup: CircularProgressIndicator = view.findViewById(R.id.progressLookup)
         val ivInfo: ImageView = view.findViewById(R.id.ivInfo)
     }
 
@@ -140,6 +141,9 @@ class CallLogAdapter(callLogs: List<CallLogItem>) :
             holder.ivProfileBg.visibility = View.VISIBLE
             holder.ivProfileBg.setBackgroundColor(ContextCompat.getColor(holder.itemView.context, R.color.brand_black))
             if (item.isLookupInProgress) {
+                holder.ivUnknownIcon.setImageResource(R.drawable.ic_person)
+                holder.ivUnknownIcon.imageTintList = ColorStateList.valueOf(Color.WHITE)
+                holder.ivUnknownIcon.visibility = View.VISIBLE
                 holder.progressLookup.visibility = View.VISIBLE
             } else {
                 holder.ivUnknownIcon.setImageResource(R.drawable.ic_person)
@@ -150,14 +154,6 @@ class CallLogAdapter(callLogs: List<CallLogItem>) :
     }
 
     private fun bindCallDirection(holder: ViewHolder, type: String) {
-        val color = when (type) {
-            "Incoming" -> "#27AE60"
-            "Outgoing" -> "#2196F3"
-            "Missed" -> "#E74C3C"
-            else -> "#757575"
-        }
-        holder.ivCallType.imageTintList = ColorStateList.valueOf(color.toColorInt())
-
         val icon = when (type) {
             "Incoming" -> R.drawable.ic_call_incoming
             "Outgoing" -> R.drawable.ic_call_outgoing
@@ -165,6 +161,14 @@ class CallLogAdapter(callLogs: List<CallLogItem>) :
             else -> R.drawable.ic_call_incoming
         }
         holder.ivCallType.setImageResource(icon)
+
+        val color = when (type) {
+            "Incoming" -> "#27AE60"
+            "Outgoing" -> "#2196F3"
+            "Missed" -> "#E74C3C"
+            else -> "#757575"
+        }
+        holder.ivCallType.imageTintList = ColorStateList.valueOf(color.toColorInt())
     }
 
     private fun formatCallTime(time: Long): String {

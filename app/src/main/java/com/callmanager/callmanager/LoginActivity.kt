@@ -59,6 +59,16 @@ class LoginActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         FirestoreUi.showPendingMessageIfAny(this)
+        if (auth.currentUser != null) {
+            navigateToMain()
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (auth.currentUser != null) {
+            navigateToMain()
+        }
     }
 
     private fun handleSignInClick() {

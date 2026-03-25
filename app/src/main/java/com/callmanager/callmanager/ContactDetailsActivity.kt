@@ -953,14 +953,11 @@ class ContactDetailsActivity : AppCompatActivity() {
 
         lifecycleScope.launch(Dispatchers.IO) {
             val historyList = mutableListOf<CallHistoryItem>()
-            val normalizedSearch = PhoneNumberVariants.toLocalTenDigits(contactNumber)
-                ?: PhoneNumberVariants.digitsOnly(contactNumber).takeLast(10)
-
             val cursor: Cursor? = contentResolver.query(
                 CallLog.Calls.CONTENT_URI,
                 null,
-                "${CallLog.Calls.NUMBER} LIKE ?",
-                arrayOf("%$normalizedSearch"),
+                null,
+                null,
                 "${CallLog.Calls.DATE} DESC"
             )
 
@@ -973,6 +970,9 @@ class ContactDetailsActivity : AppCompatActivity() {
 
                 while (it.moveToNext()) {
                     val number = it.getString(numIdx) ?: ""
+                    if (!PhoneNumberVariants.sameNumber(number, contactNumber)) {
+                        continue
+                    }
                     val type = it.getInt(typeIdx)
                     val date = it.getLong(dateIdx)
                     val durationSeconds = it.getLong(durIdx)
@@ -982,24 +982,15 @@ class ContactDetailsActivity : AppCompatActivity() {
                         -1
                     }
 
+                    val presentation = CallLogTypeMapper.toPresentation(type)
                     historyList.add(
                         CallHistoryItem(
                             time = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(date)),
-                            type = when (type) {
-                                CallLog.Calls.INCOMING_TYPE -> "Incoming"
-                                CallLog.Calls.OUTGOING_TYPE -> "Outgoing"
-                                CallLog.Calls.MISSED_TYPE -> "Missed"
-                                else -> "Incoming"
-                            },
+                            type = presentation.label,
                             number = number,
                             sim = if (subscriptionId <= 0) "1" else "2",
                             duration = formatDuration(durationSeconds),
-                            iconRes = when (type) {
-                                CallLog.Calls.INCOMING_TYPE -> R.drawable.ic_call_incoming
-                                CallLog.Calls.OUTGOING_TYPE -> R.drawable.ic_call_outgoing
-                                CallLog.Calls.MISSED_TYPE, CallLog.Calls.REJECTED_TYPE -> R.drawable.ic_call_missed
-                                else -> R.drawable.ic_call_incoming
-                            },
+                            iconRes = presentation.iconRes,
                             timestamp = date
                         )
                     )
@@ -1400,14 +1391,14 @@ class ContactDetailsActivity : AppCompatActivity() {
     private fun getCachedLookup(number: String): RemoteLookupResult? {
         val snapshot = loadCacheSnapshot() ?: return null
         return snapshot.logs.firstOrNull {
-            it.number == number && !it.lookupSource.isNullOrBlank() && !isUnknownName(it.name)
+            sameNumber(it.number, number) && !it.lookupSource.isNullOrBlank() && !isUnknownName(it.name)
         }?.let { RemoteLookupResult(it.name, it.lookupSource!!, emptyMap()) }
     }
 
     private fun persistResolvedLookup(number: String, resolved: RemoteLookupResult) {
         val snapshot = loadCacheSnapshot() ?: return
         val updatedLogs = snapshot.logs.map { item ->
-            if (item.number == number) {
+            if (sameNumber(item.number, number)) {
                 item.copy(name = resolved.name, lookupSource = resolved.source, isLookupInProgress = false)
             } else {
                 item
@@ -1434,13 +1425,16 @@ class ContactDetailsActivity : AppCompatActivity() {
     private fun saveSearchedUnknownNumbers(number: String) {
         val prefs = getSharedPreferences(CACHE_PREFS, MODE_PRIVATE)
         val values = prefs.getStringSet(SEARCHED_UNKNOWN_KEY, emptySet())?.toMutableSet() ?: mutableSetOf()
-        values += number
+        buildLookupDocumentIds(number)
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .forEach { values += it }
         prefs.edit().putStringSet(SEARCHED_UNKNOWN_KEY, values).apply()
     }
 
     private fun isUnknownName(name: String?): Boolean {
         val trimmed = name?.trim().orEmpty()
-        return trimmed.isBlank() || trimmed == contactNumber
+        return trimmed.isBlank() || sameNumber(trimmed, contactNumber)
     }
 
     private fun getInitials(name: String): String {

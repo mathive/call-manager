@@ -47,14 +47,20 @@
             app:tint="@color/white"
             tools:visibility="visible" />
 
-        <ProgressBar
+        <com.google.android.material.progressindicator.CircularProgressIndicator
             android:id="@+id/progressLookup"
-            style="?android:attr/progressBarStyleSmall"
-            android:layout_width="22dp"
-            android:layout_height="22dp"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
             android:layout_gravity="center"
             android:indeterminate="true"
             android:visibility="gone"
+            app:indicatorColor="@color/outgoing_blue"
+            app:indicatorInset="0dp"
+            app:indicatorSize="44dp"
+            app:indicatorTrackGapSize="0dp"
+            app:trackColor="#132A2A2A"
+            app:trackCornerRadius="4dp"
+            app:trackThickness="3dp"
             tools:visibility="visible" />
     </FrameLayout>
 

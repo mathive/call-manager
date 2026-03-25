@@ -15,6 +15,7 @@ object PhoneNumberVariants {
             digits.length == 11 && digits.startsWith("0") && digits[1] in '6'..'9' -> "91${digits.substring(1)}"
             digits.length == 11 && digits.startsWith("1") && digits[1] in '6'..'9' -> "91${digits.substring(1)}"
             digits.length == 12 && digits.startsWith("91") && digits[2] in '6'..'9' -> digits
+            digits.length == 13 && digits.startsWith("1") && digits[1] == '9' && digits[2] == '1' && digits[3] in '6'..'9' -> digits.substring(1)
             digits.length == 13 && digits.startsWith("091") && digits[3] in '6'..'9' -> "91${digits.substring(3)}"
             else -> null
         }

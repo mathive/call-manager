@@ -247,6 +247,7 @@ class MainActivity : AppCompatActivity() {
             navigateToLogin()
             return
         }
+        restoreCache()
         contentResolver.registerContentObserver(CallLog.Calls.CONTENT_URI, true, callLogObserver)
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
             contentResolver.registerContentObserver(ContactsContract.Contacts.CONTENT_URI, true, contactsObserver)
@@ -311,9 +312,11 @@ class MainActivity : AppCompatActivity() {
         callLogList.clear()
         callLogList.addAll(snapshot.logs)
         callLogList
-            .filter { !isUnknownEntry(it) && !it.lookupSource.isNullOrBlank() }
+            .filter { !it.lookupSource.isNullOrBlank() }
             .forEach { item ->
-                unknownLookupCache[item.number] = RemoteLookupResult(item.name, item.lookupSource!!)
+                lookupKeysFor(item.number).forEach { key ->
+                    unknownLookupCache[key] = RemoteLookupResult(item.name, item.lookupSource!!)
+                }
             }
         updateDisplayList()
         maybeBootstrapCurrentUserProfile()
@@ -358,6 +361,7 @@ class MainActivity : AppCompatActivity() {
                 CallLog.Calls.NUMBER,
                 CallLog.Calls.TYPE,
                 CallLog.Calls.DATE,
+                CallLog.Calls.DURATION,
                 CallLog.Calls.PHONE_ACCOUNT_ID
             ),
             null,
@@ -369,12 +373,14 @@ class MainActivity : AppCompatActivity() {
             val numIdx = it.getColumnIndex(CallLog.Calls.NUMBER)
             val typeIdx = it.getColumnIndex(CallLog.Calls.TYPE)
             val dateIdx = it.getColumnIndex(CallLog.Calls.DATE)
+            val durIdx = it.getColumnIndex(CallLog.Calls.DURATION)
             val accIdx = it.getColumnIndex(CallLog.Calls.PHONE_ACCOUNT_ID)
 
             while (it.moveToNext() && recentLogs.size < limit) {
                 val number = it.getString(numIdx) ?: ""
                 val type = it.getInt(typeIdx)
                 val date = it.getLong(dateIdx)
+                val durationSeconds = it.getLong(durIdx)
                 val subscriptionId = try {
                     if (accIdx >= 0) it.getInt(accIdx) else -1
                 } catch (_: Exception) {
@@ -383,19 +389,15 @@ class MainActivity : AppCompatActivity() {
                 val (name, photoUri) = contactCache.getOrPut(number) {
                     getContactDetails(number)
                 }
+                val presentation = CallLogTypeMapper.toPresentation(type)
                 recentLogs += applyCachedLookupResolution(
                     CallLogItem(
-                    name = name ?: "",
-                    number = number,
-                    type = when (type) {
-                        CallLog.Calls.INCOMING_TYPE -> "Incoming"
-                        CallLog.Calls.OUTGOING_TYPE -> "Outgoing"
-                        CallLog.Calls.MISSED_TYPE -> "Missed"
-                        else -> "Unknown"
-                    },
-                    time = date,
-                    simId = if (subscriptionId <= 0) 1 else 2,
-                    photoUri = photoUri
+                        name = name ?: "",
+                        number = number,
+                        type = presentation.label,
+                        time = date,
+                        simId = if (subscriptionId <= 0) 1 else 2,
+                        photoUri = photoUri
                     )
                 )
             }
@@ -452,6 +454,7 @@ class MainActivity : AppCompatActivity() {
                     CallLog.Calls.NUMBER,
                     CallLog.Calls.TYPE,
                     CallLog.Calls.DATE,
+                    CallLog.Calls.DURATION,
                     CallLog.Calls.PHONE_ACCOUNT_ID
                 ),
                 null,
@@ -464,6 +467,7 @@ class MainActivity : AppCompatActivity() {
                 val numIdx = it.getColumnIndex(CallLog.Calls.NUMBER)
                 val typeIdx = it.getColumnIndex(CallLog.Calls.TYPE)
                 val dateIdx = it.getColumnIndex(CallLog.Calls.DATE)
+                val durIdx = it.getColumnIndex(CallLog.Calls.DURATION)
                 val accIdx = it.getColumnIndex(CallLog.Calls.PHONE_ACCOUNT_ID)
 
                 while (it.moveToNext()) {
@@ -471,6 +475,7 @@ class MainActivity : AppCompatActivity() {
                     val number = it.getString(numIdx) ?: ""
                     val type = it.getInt(typeIdx)
                     val date = it.getLong(dateIdx)
+                    val durationSeconds = it.getLong(durIdx)
                     val subscriptionId = try {
                         if (accIdx >= 0) it.getInt(accIdx) else -1
                     } catch (_: Exception) {
@@ -485,21 +490,16 @@ class MainActivity : AppCompatActivity() {
                     val (name, photoUri) = contactCache.getOrPut(number) {
                         getContactDetails(number)
                     }
-                    val callTypeStr = when (type) {
-                        CallLog.Calls.INCOMING_TYPE -> "Incoming"
-                        CallLog.Calls.OUTGOING_TYPE -> "Outgoing"
-                        CallLog.Calls.MISSED_TYPE -> "Missed"
-                        else -> "Unknown"
-                    }
+                    val presentation = CallLogTypeMapper.toPresentation(type)
 
                     batch += applyCachedLookupResolution(
                         CallLogItem(
-                        name = name ?: "",
-                        number = number,
-                        type = callTypeStr,
-                        time = date,
-                        simId = if (subscriptionId <= 0) 1 else 2,
-                        photoUri = photoUri
+                            name = name ?: "",
+                            number = number,
+                            type = presentation.label,
+                            time = date,
+                            simId = if (subscriptionId <= 0) 1 else 2,
+                            photoUri = photoUri
                         )
                     )
 
@@ -596,7 +596,11 @@ class MainActivity : AppCompatActivity() {
 
         for (index in 1 until logs.size) {
             val next = logs[index]
-            if (next.number == current.number) {
+            val sameGroup =
+                PhoneNumberVariants.sameNumber(next.number, current.number) &&
+                    next.type == current.type &&
+                    next.simId == current.simId
+            if (sameGroup) {
                 count += next.callCount
             } else {
                 grouped += current.copy(callCount = count)
@@ -760,9 +764,11 @@ class MainActivity : AppCompatActivity() {
             }
 
             results.forEach { (number, resolvedLookup) ->
-                searchedUnknownNumbers += number
+                searchedUnknownNumbers += lookupCacheKey(number)
                 if (resolvedLookup != null) {
-                    unknownLookupCache[number] = resolvedLookup
+                    lookupKeysFor(number).forEach { key ->
+                        unknownLookupCache[key] = resolvedLookup
+                    }
                 }
             }
             saveSearchedUnknownNumbers()
@@ -1007,7 +1013,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun markLookupState(numbers: List<String>, inProgress: Boolean) {
         val updatedItems = callLogList.map { item ->
-            if (item.number in numbers && isUnknownEntry(item)) {
+            if (numbers.any { PhoneNumberVariants.sameNumber(item.number, it) } && isUnknownEntry(item)) {
                 item.copy(isLookupInProgress = inProgress)
             } else {
                 item
@@ -1022,9 +1028,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyLookupResults(results: Map<String, RemoteLookupResult?>) {
         val updatedItems = callLogList.map { item ->
-            val resolvedLookup = results[item.number]
+            val resolvedLookup = results.entries.firstOrNull {
+                PhoneNumberVariants.sameNumber(it.key, item.number)
+            }?.value
+            val hasMatchingResult = results.keys.any { PhoneNumberVariants.sameNumber(it, item.number) }
             when {
-                item.number !in results -> item
+                !hasMatchingResult -> item
                 resolvedLookup == null -> item.copy(isLookupInProgress = false)
                 else -> item.copy(
                     name = resolvedLookup.name,
@@ -1051,8 +1060,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyCachedLookupResolution(item: CallLogItem): CallLogItem {
-        if (!item.name.isBlank()) return item
-        val cachedLookup = unknownLookupCache[item.number] ?: return item
+        if (!isUnknownEntry(item)) return item
+        val cachedLookup = lookupKeysFor(item.number)
+            .firstNotNullOfOrNull { key -> unknownLookupCache[key] }
+            ?: return item
         return item.copy(
             name = cachedLookup.name,
             lookupSource = cachedLookup.source
@@ -1114,10 +1125,36 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun shouldLookupUnknownNumber(number: String): Boolean {
-        if (number.isBlank()) return false
-        if (searchedUnknownNumbers.contains(number)) return false
-        if (unknownLookupCache.containsKey(number)) return false
+        val key = lookupCacheKey(number)
+        if (key.isBlank()) return false
+        if (searchedUnknownNumbers.contains(key)) return false
+        if (unknownLookupCache.containsKey(key)) return false
         return true
+    }
+
+    private fun lookupCacheKey(number: String): String {
+        return PhoneNumberVariants.toIndianMobileDigits(number)
+            ?: PhoneNumberVariants.digitsOnly(number)
+            ?: number.trim()
+    }
+
+    private fun lookupKeysFor(number: String): Set<String> {
+        val keys = linkedSetOf<String>()
+        val canonical = lookupCacheKey(number)
+        if (canonical.isNotBlank()) {
+            keys += canonical
+        }
+        PhoneNumberVariants.buildFirestoreDocumentIds(number)
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .forEach { variant ->
+                keys += variant
+                val canonicalVariant = lookupCacheKey(variant)
+                if (canonicalVariant.isNotBlank()) {
+                    keys += canonicalVariant
+                }
+            }
+        return keys
     }
 
     private fun isUnknownEntry(item: CallLogItem): Boolean {
@@ -1379,33 +1416,43 @@ class MainActivity : AppCompatActivity() {
         val removedNumbers = previousNumbers - lookupMap.keys
 
         removedNumbers.forEach { number ->
-            if (unknownLookupCache[number]?.source == source) {
-                unknownLookupCache.remove(number)
+            lookupKeysFor(number).forEach { key ->
+                if (unknownLookupCache[key]?.source == source) {
+                    unknownLookupCache.remove(key)
+                }
             }
-            searchedUnknownNumbers.remove(number)
+            searchedUnknownNumbers.remove(lookupCacheKey(number))
         }
 
-        unknownLookupCache.putAll(lookupMap)
-        searchedUnknownNumbers.addAll(lookupMap.keys)
+        lookupMap.forEach { (number, resolved) ->
+            lookupKeysFor(number).forEach { key ->
+                unknownLookupCache[key] = resolved
+            }
+            searchedUnknownNumbers += lookupCacheKey(number)
+        }
         saveSearchedUnknownNumbers()
 
         val updatedRecents = callLogList.map { item ->
+            val matchedResolved = lookupMap.entries.firstOrNull {
+                PhoneNumberVariants.sameNumber(it.key, item.number)
+            }?.value
             when {
-                item.number in removedNumbers && item.lookupSource == source -> {
+                removedNumbers.any { PhoneNumberVariants.sameNumber(it, item.number) } &&
+                    item.lookupSource == source -> {
                     item.copy(
                         name = "",
                         isLookupInProgress = false,
                         lookupSource = null
                     )
                 }
-                else -> {
-                    val resolved = lookupMap[item.number] ?: return@map item
+                matchedResolved != null -> {
                     item.copy(
-                        name = resolved.name,
+                        name = matchedResolved.name,
                         isLookupInProgress = false,
-                        lookupSource = resolved.source
+                        lookupSource = matchedResolved.source
                     )
                 }
+                else -> item
             }
         }
 
