@@ -7,7 +7,6 @@
     android:background="@color/bg_main"
     tools:context=".MainActivity">
 
-    <!-- Header Section -->
     <View
         android:id="@+id/headerBg"
         android:layout_width="match_parent"
@@ -28,7 +27,6 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <!-- Search Bar -->
     <androidx.cardview.widget.CardView
         android:id="@+id/searchCard"
         android:layout_width="0dp"
@@ -71,7 +69,6 @@
         </LinearLayout>
     </androidx.cardview.widget.CardView>
 
-    <!-- Bottom Navigation -->
     <androidx.cardview.widget.CardView
         android:id="@+id/bottomNavCard"
         android:layout_width="match_parent"
@@ -86,7 +83,6 @@
             android:background="@color/brand_black"
             android:orientation="horizontal">
 
-            <!-- Active Tab: Recents -->
             <LinearLayout
                 android:id="@+id/tabRecents"
                 android:layout_width="0dp"
@@ -182,7 +178,6 @@
         </LinearLayout>
     </androidx.cardview.widget.CardView>
 
-    <!-- Call Log List -->
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/rvCallLog"
         android:layout_width="match_parent"
@@ -207,7 +202,6 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:tint="@color/white" />
 
-    <!-- Loading Overlay -->
     <androidx.constraintlayout.widget.ConstraintLayout
         android:id="@+id/loadingOverlay"
         android:layout_width="match_parent"
@@ -228,25 +222,16 @@
             app:layout_constraintTop_toTopOf="parent"
             app:layout_constraintVertical_bias="0.4" />
 
-        <ProgressBar
-            android:id="@+id/loadingProgressBar"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:indeterminateTint="@color/brand_red"
-            app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toTopOf="parent" />
-
         <TextView
+            android:id="@+id/tvLoadingMessage"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:text="@string/loading_call_logs"
+            android:text="@string/loading_initial_setup"
             android:textColor="@color/white"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toBottomOf="@id/loadingProgressBar" />
+            app:layout_constraintTop_toBottomOf="@id/loadingLogo" />
 
     </androidx.constraintlayout.widget.ConstraintLayout>
 

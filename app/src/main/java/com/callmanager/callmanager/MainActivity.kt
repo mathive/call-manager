@@ -1,13 +1,10 @@
 package com.callmanager.callmanager
 
 import android.Manifest
-import android.annotation.SuppressLint
-import android.app.Activity
-import android.app.role.RoleManager
-import android.content.Context
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.content.res.ColorStateList
 import android.database.ContentObserver
 import android.database.Cursor
 import android.graphics.Color
@@ -18,6 +15,9 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.CallLog
 import android.provider.ContactsContract
+import android.provider.Settings
+import android.telephony.TelephonyCallback
+import android.telephony.TelephonyManager
 import android.util.Log
 import android.view.View
 import android.widget.EditText
@@ -25,425 +25,1221 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
-import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.edit
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import androidx.work.*
 import com.google.android.gms.auth.api.identity.GetPhoneNumberHintIntentRequest
 import com.google.android.gms.auth.api.identity.Identity
+import com.google.android.gms.common.api.ApiException
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.firestore.FieldPath
 import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.firestore.ListenerRegistration
-import com.google.firebase.firestore.SetOptions
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
-import java.util.concurrent.TimeUnit
+
+data class CallLogItem(
+    var name: String,
+    val number: String,
+    val type: String,
+    val time: Long,
+    val simId: Int = 1,
+    val photoUri: String? = null,
+    val callCount: Int = 1,
+    val isLookupInProgress: Boolean = false,
+    val lookupSource: String? = null
+)
+
+private data class CallLogCacheSnapshot(
+    val latestId: String? = null,
+    val latestDate: Long = 0L,
+    val logs: List<CallLogItem> = emptyList()
+)
 
 class MainActivity : AppCompatActivity() {
-    
     private val auth = FirebaseAuth.getInstance()
-    private val db = FirebaseFirestore.getInstance()
-    private lateinit var phoneNumberHintLauncher: ActivityResultLauncher<IntentSenderRequest>
+    private val gson = Gson()
     private lateinit var rvCallLog: RecyclerView
     private lateinit var callLogAdapter: CallLogAdapter
     private lateinit var loadingOverlay: View
     private lateinit var loadingLogo: ImageView
+    private lateinit var loadingAnimator: ObjectAnimator
     private val callLogList = mutableListOf<CallLogItem>()
-    private var isDataReady = false
-    private val gson = Gson()
-    private val observerHandler = Handler(Looper.getMainLooper())
-    private var isMainUiInitialized = false
-    private var isMainUiBound = false
-    
-    private var blockedNumbersListener: ListenerRegistration? = null
-    private var blockedNumbersSet = mutableSetOf<String>()
-    
-    private var whiteListListener: ListenerRegistration? = null
-    private var whiteListSet = mutableSetOf<String>()
-    
-    private val dbNameCache = mutableMapOf<String, String>()
-    private val globalSpamSet = mutableSetOf<String>()
+    private val blockListItems = mutableListOf<CallLogItem>()
+    private val whiteListItems = mutableListOf<CallLogItem>()
     private var activeTab = "Recents"
+    private var cachedLatestId: String? = null
+    private var cachedLatestDate: Long = 0L
+    private val observerHandler = Handler(Looper.getMainLooper())
+    private val pollHandler = Handler(Looper.getMainLooper())
+    private var isSyncInProgress = false
+    private var pendingSyncRequested = false
+    private var hasCheckedProfileBootstrap = false
+    private var isProfileBootstrapInProgress = false
+    private var pendingProfileBootstrap: PendingProfileBootstrap? = null
+    private var isUnknownLookupRunning = false
+    private var pendingUnknownLookupRequested = false
+    private val unknownLookupCache = mutableMapOf<String, RemoteLookupResult>()
+    private val searchedUnknownNumbers = mutableSetOf<String>()
+    private var visibleLookupNumbers = emptySet<String>()
+    private val viewportLookupRunnable = Runnable { scheduleUnknownNumberLookup() }
+    private var isListTabSyncInProgress = false
+    private var pendingRefreshCompletionLabel: String? = null
 
-    private data class UserProfileCache(
-        val uid: String,
-        val fullName: String,
-        val email: String,
-        val mobileNumber: String,
-        val role: String
-    )
+    companion object {
+        private const val TAG = "MainActivity"
+        private const val CACHE_PREFS = "call_log_cache"
+        private const val CACHE_KEY = "call_log_snapshot"
+        private const val SEARCHED_UNKNOWN_KEY = "searched_unknown_numbers"
+        private const val BATCH_SIZE = 100
+        private const val RECENT_SYNC_SIZE = 50
+        private const val UNKNOWN_LOOKUP_BATCH_SIZE = 10
+        private const val CHANGE_DEBOUNCE_MS = 400L
+        private const val POLL_INTERVAL_MS = 2000L
+        private const val CALL_END_REFRESH_DELAY_MS = 900L
+        private const val LIST_TAB_PLACEHOLDER_TIME = 0L
+    }
 
-    private val callLogObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
+    private val callLogObserver = object : ContentObserver(observerHandler) {
         override fun onChange(selfChange: Boolean) {
             super.onChange(selfChange)
-            observerHandler.removeCallbacksAndMessages(null)
-            observerHandler.postDelayed({ loadCallLogInBackground() }, 400)
+            observerHandler.removeCallbacks(syncRunnable)
+            observerHandler.removeCallbacks(contactSyncRunnable)
+            observerHandler.postDelayed(syncRunnable, CHANGE_DEBOUNCE_MS)
+        }
+    }
+
+    private val contactsObserver = object : ContentObserver(observerHandler) {
+        override fun onChange(selfChange: Boolean) {
+            super.onChange(selfChange)
+            observerHandler.removeCallbacks(contactSyncRunnable)
+            observerHandler.postDelayed(contactSyncRunnable, CHANGE_DEBOUNCE_MS)
+        }
+    }
+
+    private val syncRunnable = Runnable {
+        if (auth.currentUser != null && getMissingRuntimePermissions().isEmpty()) {
+            syncRecentLogs(showOverlay = false)
+        }
+    }
+
+    private val contactSyncRunnable = Runnable {
+        if (auth.currentUser != null && getMissingRuntimePermissions().isEmpty()) {
+            syncContactsToDb()
+            refreshCachedContactDetails()
+            syncRecentLogs(showOverlay = false)
+        }
+    }
+
+    private val foregroundPollRunnable = object : Runnable {
+        override fun run() {
+            if (auth.currentUser != null && getMissingRuntimePermissions().isEmpty()) {
+                syncRecentLogs(showOverlay = false)
+                pollHandler.postDelayed(this, POLL_INTERVAL_MS)
+            }
+        }
+    }
+
+    private var lastCallState: Int = TelephonyManager.CALL_STATE_IDLE
+    private val telephonyManager by lazy {
+        getSystemService(TelephonyManager::class.java)
+    }
+    private val callStateCallback = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        object : TelephonyCallback(), TelephonyCallback.CallStateListener {
+            override fun onCallStateChanged(state: Int) {
+                handleCallStateChanged(state)
+            }
+        }
+    } else {
+        null
+    }
+    private val callEndedRefreshRunnable = Runnable {
+        if (auth.currentUser != null && getMissingRuntimePermissions().isEmpty()) {
+            syncRecentLogs(showOverlay = false)
         }
     }
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        val hasCallLogPermission = permissions[Manifest.permission.READ_CALL_LOG] == true
-        val hasContactsPermission = permissions[Manifest.permission.READ_CONTACTS] == true
-
-        if (hasCallLogPermission) {
-            checkPermissionAndLoadLogs()
+        val allGranted = permissions.entries.all { it.value }
+        if (allGranted) {
+            if (Settings.canDrawOverlays(this)) {
+                syncAllLogsInBatches(showOverlay = callLogList.isEmpty())
+            } else {
+                showOverlayDialog()
+            }
         } else {
-            Toast.makeText(this, R.string.permission_denied, Toast.LENGTH_SHORT).show()
-        }
-
-        if (hasContactsPermission) {
-            scheduleContactSync()
-        }
-    }
-
-    private val roleRequestLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            Toast.makeText(this, R.string.call_screening_granted, Toast.LENGTH_SHORT).show()
-        } else {
-            Toast.makeText(this, R.string.call_screening_denied, Toast.LENGTH_LONG).show()
+            val deniedPermanently = getMissingRuntimePermissions().any {
+                !ActivityCompat.shouldShowRequestPermissionRationale(this, it)
+            }
+            if (deniedPermanently) {
+                showAppSettingsDialog()
+            } else {
+                Toast.makeText(this, R.string.permissions_required_all, Toast.LENGTH_LONG).show()
+            }
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        val splashScreen = installSplashScreen()
-        splashScreen.setKeepOnScreenCondition { !isDataReady }
-
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        initializeMainUiShell()
-        
-        phoneNumberHintLauncher = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
-            if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-                try {
-                    var phoneNumber = Identity.getSignInClient(this).getPhoneNumberFromIntent(result.data)
-                    if (phoneNumber.startsWith("+1") && phoneNumber.length == 12) {
-                        phoneNumber = "+91" + phoneNumber.substring(2)
-                    }
-                    updatePhoneNumber(phoneNumber)
-                } catch (e: Exception) {
-                    setupMainUI(auth.currentUser?.displayName ?: "User")
-                }
-            } else {
-                setupMainUI(auth.currentUser?.displayName ?: "User")
-            }
-        }
 
-        val currentUser = auth.currentUser
-        if (currentUser == null) {
-            handleDeepLink()
-            return
-        }
-
-        loadCachedProfile(currentUser.uid)?.let { cachedProfile ->
-            if (cachedProfile.mobileNumber.isNotBlank()) {
-                setupMainUI(cachedProfile.fullName)
-            }
-        }
-
-        checkUserProfile(currentUser.uid, currentUser.email ?: "", currentUser.displayName)
-        requestCallScreeningRole()
-    }
-
-    private fun requestCallScreeningRole() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val roleManager = getSystemService(RoleManager::class.java)
-            if (roleManager.isRoleAvailable(RoleManager.ROLE_CALL_SCREENING) &&
-                !roleManager.isRoleHeld(RoleManager.ROLE_CALL_SCREENING)) {
-                val intent = roleManager.createRequestRoleIntent(RoleManager.ROLE_CALL_SCREENING)
-                roleRequestLauncher.launch(intent)
-            }
-        }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        FirestoreUi.showPendingMessageIfAny(this)
-        contentResolver.registerContentObserver(CallLog.Calls.CONTENT_URI, true, callLogObserver)
-        if (isDataReady) {
-            // Reload caches from SharedPreferences to stay in sync with other activities
-            loadBlockedNumbersCache()
-            loadWhiteListCache()
-            loadDbNameCache()
-            loadCallLogInBackground()
-        }
-        if (activeTab == "Profile") {
-            switchTab("Recents")
-        }
-    }
-
-    override fun onPause() {
-        super.onPause()
-        contentResolver.unregisterContentObserver(callLogObserver)
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        observerHandler.removeCallbacksAndMessages(null)
-        blockedNumbersListener?.remove()
-        whiteListListener?.remove()
-    }
-
-    private fun checkUserProfile(uid: String, email: String, googleName: String?) {
-        db.collection("users").document(uid).get()
-            .addOnSuccessListener { document ->
-                if (document != null && document.exists()) {
-                    val mobileNumber = document.getString("mobileNumber")
-                    val fullName = document.getString("fullName") ?: "User"
-                    saveProfileCache(
-                        UserProfileCache(
-                            uid = uid,
-                            fullName = fullName,
-                            email = document.getString("email") ?: email,
-                            mobileNumber = mobileNumber.orEmpty(),
-                            role = document.getString("role") ?: "Guest"
-                        )
-                    )
-                    if (mobileNumber.isNullOrEmpty()) {
-                        promptForPhoneNumber()
-                    } else {
-                        setupMainUI(fullName)
-                    }
-                } else {
-                    createNewUserProfile(uid, email, googleName)
-                }
-            }
-            .addOnFailureListener { e ->
-                FirestoreUi.handleFailure(this, e, "MainActivity")
-                auth.signOut()
-                navigateToLogin()
-            }
-    }
-
-    private fun createNewUserProfile(uid: String, email: String, googleName: String?) {
-        db.collection("pending_users").document(email).get()
-            .addOnSuccessListener { pendingDoc ->
-                val fullName = if (pendingDoc.exists()) {
-                    pendingDoc.getString("fullName") ?: "User"
-                } else {
-                    googleName ?: "User"
-                }
-                val userData = hashMapOf(
-                    "fullName" to fullName,
-                    "email" to email,
-                    "isVerified" to true,
-                    "role" to "Guest"
-                )
-                db.collection("users").document(uid).set(userData)
-                    .addOnSuccessListener {
-                        saveProfileCache(
-                            UserProfileCache(
-                                uid = uid,
-                                fullName = fullName,
-                                email = email,
-                                mobileNumber = "",
-                                role = "Guest"
-                            )
-                        )
-                        db.collection("pending_users").document(email).delete()
-                        promptForPhoneNumber()
-                    }
-                    .addOnFailureListener { e ->
-                        FirestoreUi.handleFailure(this, e, "MainActivity")
-                        navigateToLogin()
-                    }
-            }
-    }
-
-    private fun promptForPhoneNumber() {
-        val request = GetPhoneNumberHintIntentRequest.builder().build()
-        Identity.getSignInClient(this)
-            .getPhoneNumberHintIntent(request)
-            .addOnSuccessListener { result ->
-                try {
-                    phoneNumberHintLauncher.launch(IntentSenderRequest.Builder(result).build())
-                } catch (e: Exception) {
-                    setupMainUI(auth.currentUser?.displayName ?: "User")
-                }
-            }
-            .addOnFailureListener {
-                setupMainUI(auth.currentUser?.displayName ?: "User")
-            }
-    }
-
-    private fun updatePhoneNumber(phoneNumber: String) {
-        val uid = auth.currentUser?.uid ?: return
-        val normalizedPhone = normalizeNumber(phoneNumber)
-        if (!isValidMobileNumber(normalizedPhone)) {
-            setupMainUI(auth.currentUser?.displayName ?: "User")
-            return
-        }
-
-        db.collection("users").document(uid)
-            .set(mapOf("mobileNumber" to normalizedPhone), SetOptions.merge())
-            .addOnSuccessListener {
-                val cachedProfile = loadCachedProfile(uid)
-                saveProfileCache(
-                    UserProfileCache(
-                        uid = uid,
-                        fullName = cachedProfile?.fullName ?: (auth.currentUser?.displayName ?: "User"),
-                        email = cachedProfile?.email ?: (auth.currentUser?.email ?: ""),
-                        mobileNumber = normalizedPhone,
-                        role = cachedProfile?.role ?: "Guest"
-                    )
-                )
-                setupMainUI(cachedProfile?.fullName ?: (auth.currentUser?.displayName ?: "User"))
-            }
-            .addOnFailureListener { e ->
-                Log.e("MainActivity", "Failed to save mobile number", e)
-                FirestoreUi.handleFailure(this, e, "MainActivity")
-                setupMainUI(auth.currentUser?.displayName ?: "User")
-            }
-    }
-
-    private fun handleDeepLink() {
-        val data = intent.data
-        if (data == null) {
+        if (auth.currentUser == null) {
             navigateToLogin()
             return
         }
-        val emailLink = data.toString()
-        if (auth.isSignInWithEmailLink(emailLink)) {
-            val sharedPref = getSharedPreferences("Auth", Context.MODE_PRIVATE)
-            val email = sharedPref.getString("email", "") ?: ""
-            auth.signInWithEmailLink(email, emailLink)
-                .addOnCompleteListener { task ->
-                    if (task.isSuccessful) {
-                        recreate()
-                    } else {
-                        navigateToLogin()
-                    }
-                }
-        } else {
-            navigateToLogin()
-        }
-    }
 
-    private fun setupMainUI(fullName: String) {
-        initializeMainUiShell()
-        isDataReady = true
-        
-        loadFromCache()
-        loadBlockedNumbersCache()
-        loadWhiteListCache()
-        loadDbNameCache() // Load cached online names
-
-        if (callLogList.isNotEmpty()) {
-            callLogAdapter.updateData(callLogList)
-        }
-
-        if (!isMainUiBound) {
-            findViewById<EditText>(R.id.etSearchMain).setOnClickListener {
-                startActivity(Intent(this, SearchActivity::class.java))
-            }
-
-            findViewById<LinearLayout>(R.id.tabRecents).setOnClickListener { switchTab("Recents") }
-            findViewById<LinearLayout>(R.id.tabBlockList).setOnClickListener { switchTab("BlockList") }
-            findViewById<LinearLayout>(R.id.tabWhiteList).setOnClickListener { switchTab("WhiteList") }
-            findViewById<LinearLayout>(R.id.tabProfile).setOnClickListener { switchTab("Profile") }
-
-            findViewById<FloatingActionButton>(R.id.fabRefresh).setOnClickListener {
-                refreshCache()
-            }
-
-            setupBlockedNumbersListener()
-            setupWhiteListListener()
-            checkPermissionAndLoadLogs()
-            scheduleContactSync()
-            isMainUiBound = true
-        }
-    }
-
-    private fun initializeMainUiShell() {
-        if (isMainUiInitialized) return
         rvCallLog = findViewById(R.id.rvCallLog)
         loadingOverlay = findViewById(R.id.loadingOverlay)
         loadingLogo = findViewById(R.id.loadingLogo)
         rvCallLog.layoutManager = LinearLayoutManager(this)
         callLogAdapter = CallLogAdapter(callLogList)
         rvCallLog.adapter = callLogAdapter
-        startLoadingAnimation()
-        isMainUiInitialized = true
-    }
+        rvCallLog.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                super.onScrolled(recyclerView, dx, dy)
+                updateVisibleUnknownLookupTargets()
+            }
 
-    private fun startLoadingAnimation() {
-        loadingOverlay.visibility = View.GONE
-    }
+            override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                super.onScrollStateChanged(recyclerView, newState)
+                updateVisibleUnknownLookupTargets()
+            }
+        })
+        loadingAnimator = ObjectAnimator.ofFloat(loadingLogo, View.ROTATION_Y, 0f, 360f).apply {
+            duration = 1200L
+            repeatCount = ValueAnimator.INFINITE
+            interpolator = android.view.animation.LinearInterpolator()
+        }
 
-    private fun stopLoadingAnimation() {
-        loadingLogo.clearAnimation()
-        loadingOverlay.visibility = View.GONE
-    }
-
-    private fun refreshCache() {
-        Toast.makeText(this, R.string.refreshing_cache, Toast.LENGTH_SHORT).show()
-        
-        // 1. Clear all memory caches
-        dbNameCache.clear()
-        globalSpamSet.clear()
-        blockedNumbersSet.clear()
-        whiteListSet.clear()
-        
-        // 2. Clear all persistent caches
-        getSharedPreferences("CallLogCache", Context.MODE_PRIVATE).edit { clear() }
-        getSharedPreferences("DbNameCache", Context.MODE_PRIVATE).edit { clear() }
-        getSharedPreferences("BlockedNumbersCache", Context.MODE_PRIVATE).edit { clear() }
-        getSharedPreferences("WhitelistCache", Context.MODE_PRIVATE).edit { clear() }
-        
-        // 3. Reset UI and trigger full reload
-        startLoadingAnimation()
-        callLogList.clear()
-        updateDisplayList()
-        
-        // 4. Reload device logs and online names
-        loadCallLogInBackground()
-        
-        // 5. Re-trigger listeners
-        blockedNumbersListener?.remove()
-        setupBlockedNumbersListener()
-        whiteListListener?.remove()
-        setupWhiteListListener()
-    }
-
-    private fun switchTab(tab: String) {
-        if (tab == "Profile") {
+        findViewById<EditText>(R.id.etSearchMain).setOnClickListener {
+            startActivity(Intent(this, SearchActivity::class.java))
+        }
+        findViewById<LinearLayout>(R.id.tabRecents).setOnClickListener { switchTab("Recents") }
+        findViewById<LinearLayout>(R.id.tabBlockList).setOnClickListener { switchTab("BlockList") }
+        findViewById<LinearLayout>(R.id.tabWhiteList).setOnClickListener { switchTab("WhiteList") }
+        findViewById<LinearLayout>(R.id.tabProfile).setOnClickListener {
             startActivity(Intent(this, ProfileActivity::class.java))
+        }
+        findViewById<FloatingActionButton>(R.id.fabRefresh).setOnClickListener {
+            handleRefreshAction()
+        }
+
+        restoreCache()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        FirestoreUi.showPendingMessageIfAny(this)
+        if (auth.currentUser == null) {
+            navigateToLogin()
+            return
+        }
+        contentResolver.registerContentObserver(CallLog.Calls.CONTENT_URI, true, callLogObserver)
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
+            contentResolver.registerContentObserver(ContactsContract.Contacts.CONTENT_URI, true, contactsObserver)
+            contentResolver.registerContentObserver(ContactsContract.Data.CONTENT_URI, true, contactsObserver)
+            contentResolver.registerContentObserver(ContactsContract.CommonDataKinds.Phone.CONTENT_URI, true, contactsObserver)
+            refreshCachedContactDetails()
+            syncContactsToDb()
+        }
+        registerCallStateListenerIfPossible()
+        pollHandler.removeCallbacksAndMessages(null)
+        pollHandler.post(foregroundPollRunnable)
+        ensurePermissionsOrLoad()
+        rvCallLog.post { updateVisibleUnknownLookupTargets() }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        contentResolver.unregisterContentObserver(callLogObserver)
+        runCatching { contentResolver.unregisterContentObserver(contactsObserver) }
+        observerHandler.removeCallbacksAndMessages(null)
+        unregisterCallStateListener()
+        pollHandler.removeCallbacksAndMessages(null)
+    }
+
+    private fun ensurePermissionsOrLoad(forceReload: Boolean = false) {
+        val missingRuntimePermissions = getMissingRuntimePermissions()
+        when {
+            missingRuntimePermissions.isNotEmpty() -> {
+                val shouldShowRationale = missingRuntimePermissions.any {
+                    ActivityCompat.shouldShowRequestPermissionRationale(this, it)
+                }
+                if (shouldShowRationale) {
+                    AlertDialog.Builder(this)
+                        .setTitle(R.string.permission_required_title)
+                        .setMessage(R.string.permission_required_message)
+                        .setPositiveButton(R.string.enable) { _, _ ->
+                            requestPermissionLauncher.launch(missingRuntimePermissions.toTypedArray())
+                        }
+                        .setNegativeButton(R.string.cancel, null)
+                        .show()
+                } else {
+                    requestPermissionLauncher.launch(missingRuntimePermissions.toTypedArray())
+                }
+            }
+            !Settings.canDrawOverlays(this) -> {
+                showOverlayDialog()
+            }
+            forceReload -> {
+                syncAllLogsInBatches(showOverlay = callLogList.isEmpty())
+            }
+            else -> {
+                syncRecentLogs(showOverlay = callLogList.isEmpty())
+            }
+        }
+    }
+
+    private fun restoreCache() {
+        val snapshot = loadCacheSnapshot() ?: return
+        loadSearchedUnknownNumbers()
+        cachedLatestId = snapshot.latestId
+        cachedLatestDate = snapshot.latestDate
+        callLogList.clear()
+        callLogList.addAll(snapshot.logs)
+        callLogList
+            .filter { !isUnknownEntry(it) && !it.lookupSource.isNullOrBlank() }
+            .forEach { item ->
+                unknownLookupCache[item.number] = RemoteLookupResult(item.name, item.lookupSource!!)
+            }
+        updateDisplayList()
+        maybeBootstrapCurrentUserProfile()
+        updateVisibleUnknownLookupTargets()
+    }
+
+    private fun syncRecentLogs(showOverlay: Boolean) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val recentLogs = queryRecentLogs(RECENT_SYNC_SIZE)
+            val latestRecord = recentLogs.firstOrNull()?.let {
+                buildGroupedLogKey(it) to it.time
+            }
+
+            if (recentLogs.isNotEmpty()) {
+                withContext(Dispatchers.Main) {
+                    if (showOverlay) showLoadingOverlay()
+                    applyRecentLogs(recentLogs)
+                    if (showOverlay) hideLoadingOverlay()
+                }
+            }
+
+            val shouldSyncFull = recentLogs.isEmpty() ||
+                latestRecord == null ||
+                latestRecord.first != cachedLatestId ||
+                latestRecord.second != cachedLatestDate ||
+                callLogList.size < recentLogs.size
+
+            if (shouldSyncFull) {
+                withContext(Dispatchers.Main) {
+                    syncAllLogsInBatches(showOverlay = false)
+                }
+            }
+        }
+    }
+
+    private fun queryRecentLogs(limit: Int): List<CallLogItem> {
+        val recentLogs = mutableListOf<CallLogItem>()
+        val contactCache = mutableMapOf<String, Pair<String?, String?>>()
+        val cursor: Cursor? = contentResolver.query(
+            CallLog.Calls.CONTENT_URI,
+            arrayOf(
+                CallLog.Calls.NUMBER,
+                CallLog.Calls.TYPE,
+                CallLog.Calls.DATE,
+                CallLog.Calls.PHONE_ACCOUNT_ID
+            ),
+            null,
+            null,
+            "${CallLog.Calls.DATE} DESC"
+        )
+
+        cursor?.use {
+            val numIdx = it.getColumnIndex(CallLog.Calls.NUMBER)
+            val typeIdx = it.getColumnIndex(CallLog.Calls.TYPE)
+            val dateIdx = it.getColumnIndex(CallLog.Calls.DATE)
+            val accIdx = it.getColumnIndex(CallLog.Calls.PHONE_ACCOUNT_ID)
+
+            while (it.moveToNext() && recentLogs.size < limit) {
+                val number = it.getString(numIdx) ?: ""
+                val type = it.getInt(typeIdx)
+                val date = it.getLong(dateIdx)
+                val subscriptionId = try {
+                    if (accIdx >= 0) it.getInt(accIdx) else -1
+                } catch (_: Exception) {
+                    -1
+                }
+                val (name, photoUri) = contactCache.getOrPut(number) {
+                    getContactDetails(number)
+                }
+                recentLogs += applyCachedLookupResolution(
+                    CallLogItem(
+                    name = name ?: "",
+                    number = number,
+                    type = when (type) {
+                        CallLog.Calls.INCOMING_TYPE -> "Incoming"
+                        CallLog.Calls.OUTGOING_TYPE -> "Outgoing"
+                        CallLog.Calls.MISSED_TYPE -> "Missed"
+                        else -> "Unknown"
+                    },
+                    time = date,
+                    simId = if (subscriptionId <= 0) 1 else 2,
+                    photoUri = photoUri
+                    )
+                )
+            }
+        }
+
+        return groupConsecutiveCalls(recentLogs).take(limit)
+    }
+
+    private fun applyRecentLogs(recentLogs: List<CallLogItem>) {
+        val merged = LinkedHashMap<String, CallLogItem>()
+        recentLogs.forEach { merged[buildGroupedLogKey(it)] = it }
+        callLogList.forEach { item ->
+            merged.putIfAbsent(buildGroupedLogKey(item), item)
+        }
+
+        val updatedList = merged.values.toList()
+        callLogList.clear()
+        callLogList.addAll(updatedList)
+        updateDisplayList()
+        maybeBootstrapCurrentUserProfile()
+        updateVisibleUnknownLookupTargets()
+
+        val latestItem = recentLogs.firstOrNull()
+        cachedLatestId = latestItem?.let { buildGroupedLogKey(it) }
+        cachedLatestDate = latestItem?.time ?: 0L
+        saveCacheSnapshot(
+            CallLogCacheSnapshot(
+                latestId = cachedLatestId,
+                latestDate = cachedLatestDate,
+                logs = updatedList
+            )
+        )
+    }
+
+    private fun syncAllLogsInBatches(showOverlay: Boolean) {
+        if (isSyncInProgress) {
+            pendingSyncRequested = true
+            return
+        }
+        isSyncInProgress = true
+        if (showOverlay) {
+            showLoadingOverlay()
+        }
+        lifecycleScope.launch(Dispatchers.IO) {
+            val allLogs = mutableListOf<CallLogItem>()
+            val batch = mutableListOf<CallLogItem>()
+            val contactCache = mutableMapOf<String, Pair<String?, String?>>()
+            var latestId: String? = null
+            var latestDate = 0L
+            val cursor: Cursor? = contentResolver.query(
+                CallLog.Calls.CONTENT_URI,
+                arrayOf(
+                    CallLog.Calls._ID,
+                    CallLog.Calls.NUMBER,
+                    CallLog.Calls.TYPE,
+                    CallLog.Calls.DATE,
+                    CallLog.Calls.PHONE_ACCOUNT_ID
+                ),
+                null,
+                null,
+                "${CallLog.Calls.DATE} DESC"
+            )
+
+            cursor?.use {
+                val idIdx = it.getColumnIndex(CallLog.Calls._ID)
+                val numIdx = it.getColumnIndex(CallLog.Calls.NUMBER)
+                val typeIdx = it.getColumnIndex(CallLog.Calls.TYPE)
+                val dateIdx = it.getColumnIndex(CallLog.Calls.DATE)
+                val accIdx = it.getColumnIndex(CallLog.Calls.PHONE_ACCOUNT_ID)
+
+                while (it.moveToNext()) {
+                    val rowId = it.getString(idIdx)
+                    val number = it.getString(numIdx) ?: ""
+                    val type = it.getInt(typeIdx)
+                    val date = it.getLong(dateIdx)
+                    val subscriptionId = try {
+                        if (accIdx >= 0) it.getInt(accIdx) else -1
+                    } catch (_: Exception) {
+                        -1
+                    }
+
+                    if (latestId == null) {
+                        latestId = rowId
+                        latestDate = date
+                    }
+
+                    val (name, photoUri) = contactCache.getOrPut(number) {
+                        getContactDetails(number)
+                    }
+                    val callTypeStr = when (type) {
+                        CallLog.Calls.INCOMING_TYPE -> "Incoming"
+                        CallLog.Calls.OUTGOING_TYPE -> "Outgoing"
+                        CallLog.Calls.MISSED_TYPE -> "Missed"
+                        else -> "Unknown"
+                    }
+
+                    batch += applyCachedLookupResolution(
+                        CallLogItem(
+                        name = name ?: "",
+                        number = number,
+                        type = callTypeStr,
+                        time = date,
+                        simId = if (subscriptionId <= 0) 1 else 2,
+                        photoUri = photoUri
+                        )
+                    )
+
+                    if (batch.size == BATCH_SIZE) {
+                        allLogs.addAll(batch)
+                        publishBatch(
+                            accumulatedLogs = groupConsecutiveCalls(allLogs),
+                            latestId = latestId,
+                            latestDate = latestDate,
+                            hideOverlay = false
+                        )
+                        batch.clear()
+                    }
+                }
+            }
+
+            if (batch.isNotEmpty()) {
+                allLogs.addAll(batch)
+                publishBatch(
+                    accumulatedLogs = groupConsecutiveCalls(allLogs),
+                    latestId = latestId,
+                    latestDate = latestDate,
+                    hideOverlay = false
+                )
+            }
+
+            withContext(Dispatchers.Main) {
+                isSyncInProgress = false
+                if (showOverlay) {
+                    hideLoadingOverlay()
+                }
+                if (allLogs.isEmpty()) {
+                    callLogList.clear()
+                    updateDisplayList()
+                    Toast.makeText(this@MainActivity, R.string.no_call_logs_found, Toast.LENGTH_SHORT).show()
+                }
+                pendingRefreshCompletionLabel?.let { label ->
+                    Toast.makeText(
+                        this@MainActivity,
+                        getString(R.string.refreshed_tab, label),
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    pendingRefreshCompletionLabel = null
+                }
+                if (pendingSyncRequested) {
+                    pendingSyncRequested = false
+                    syncAllLogsInBatches(showOverlay = false)
+                }
+            }
+        }
+    }
+
+    private suspend fun publishBatch(
+        accumulatedLogs: List<CallLogItem>,
+        latestId: String?,
+        latestDate: Long,
+        hideOverlay: Boolean
+    ) {
+        saveCacheSnapshot(
+            CallLogCacheSnapshot(
+                latestId = latestId ?: accumulatedLogs.firstOrNull()?.let { buildGroupedLogKey(it) },
+                latestDate = latestDate,
+                logs = accumulatedLogs
+            )
+        )
+        withContext(Dispatchers.Main) {
+            cachedLatestId = latestId ?: accumulatedLogs.firstOrNull()?.let { buildGroupedLogKey(it) }
+            cachedLatestDate = if (latestDate != 0L) latestDate else accumulatedLogs.firstOrNull()?.time ?: 0L
+            callLogList.clear()
+            callLogList.addAll(accumulatedLogs)
+            updateDisplayList()
+            maybeBootstrapCurrentUserProfile()
+            updateVisibleUnknownLookupTargets()
+            if (hideOverlay) {
+                hideLoadingOverlay()
+            }
+        }
+    }
+
+    private fun buildLogKey(item: CallLogItem): String {
+        return "${item.number}|${item.time}|${item.type}|${item.simId}"
+    }
+
+    private fun buildGroupedLogKey(item: CallLogItem): String {
+        return "${item.number}|${item.time}|${item.type}|${item.simId}|${item.callCount}"
+    }
+
+    private fun groupConsecutiveCalls(logs: List<CallLogItem>): List<CallLogItem> {
+        if (logs.isEmpty()) return emptyList()
+
+        val grouped = mutableListOf<CallLogItem>()
+        var current = logs.first()
+        var count = current.callCount
+
+        for (index in 1 until logs.size) {
+            val next = logs[index]
+            if (next.number == current.number) {
+                count += next.callCount
+            } else {
+                grouped += current.copy(callCount = count)
+                current = next
+                count = current.callCount
+            }
+        }
+
+        grouped += current.copy(callCount = count)
+        return grouped
+    }
+
+    private fun showLoadingOverlay() {
+        loadingOverlay.visibility = View.VISIBLE
+        loadingAnimator.cancel()
+        loadingLogo.rotationY = 0f
+        loadingAnimator.start()
+    }
+
+    private fun hideLoadingOverlay() {
+        loadingAnimator.cancel()
+        loadingLogo.rotationY = 0f
+        loadingOverlay.visibility = View.GONE
+    }
+
+    private fun getContactDetails(phoneNumber: String): Pair<String?, String?> {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+            return Pair(null, null)
+        }
+
+        val uri = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(phoneNumber))
+        val projection = arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME, ContactsContract.PhoneLookup.PHOTO_URI)
+        return try {
+            contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    Pair(cursor.getString(0), cursor.getString(1))
+                } else {
+                    Pair(null, null)
+                }
+            } ?: Pair(null, null)
+        } catch (_: Exception) {
+            Pair(null, null)
+        }
+    }
+
+    private fun rebuildCachesAndRefresh() {
+        resetLookupCaches()
+        ensurePermissionsOrLoad(forceReload = true)
+    }
+
+    private fun handleRefreshAction() {
+        when (activeTab) {
+            "BlockList" -> {
+                Toast.makeText(this, getString(R.string.refreshing_tab, getTabDisplayName(activeTab)), Toast.LENGTH_SHORT).show()
+                syncLookupCollectionIntoUi("blocked_numbers", LookupSource.BLOCKED, true)
+            }
+            "WhiteList" -> {
+                Toast.makeText(this, getString(R.string.refreshing_tab, getTabDisplayName(activeTab)), Toast.LENGTH_SHORT).show()
+                syncLookupCollectionIntoUi("white_list_numbers", LookupSource.WHITELIST, true)
+            }
+            else -> {
+                pendingRefreshCompletionLabel = getTabDisplayName(activeTab)
+                Toast.makeText(this, getString(R.string.refreshing_tab, pendingRefreshCompletionLabel), Toast.LENGTH_SHORT).show()
+                rebuildCachesAndRefresh()
+            }
+        }
+    }
+
+    private fun refreshCachedContactDetails() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
             return
         }
 
+        lifecycleScope.launch(Dispatchers.IO) {
+            val currentItems = callLogList.toList()
+            if (currentItems.isEmpty()) return@launch
+
+            val contactCache = mutableMapOf<String, Pair<String?, String?>>()
+            val refreshedItems = currentItems.map { item ->
+                val (name, photoUri) = contactCache.getOrPut(item.number) {
+                    getContactDetails(item.number)
+                }
+                val updatedItem = if (!name.isNullOrBlank()) {
+                    item.copy(
+                        name = name,
+                        photoUri = photoUri,
+                        lookupSource = null
+                    )
+                } else {
+                    applyCachedLookupResolution(
+                        item.copy(
+                            name = "",
+                            photoUri = photoUri
+                        )
+                    )
+                }
+                updatedItem
+            }
+
+            saveCacheSnapshot(
+                CallLogCacheSnapshot(
+                    latestId = cachedLatestId,
+                    latestDate = cachedLatestDate,
+                    logs = refreshedItems
+                )
+            )
+
+            withContext(Dispatchers.Main) {
+                callLogList.clear()
+                callLogList.addAll(refreshedItems)
+                updateDisplayList()
+                updateVisibleUnknownLookupTargets()
+            }
+        }
+    }
+
+    private fun scheduleUnknownNumberLookup() {
+        if (auth.currentUser == null) return
+        if (isUnknownLookupRunning) {
+            pendingUnknownLookupRequested = true
+            return
+        }
+
+        val pendingNumbers = callLogList
+            .filter { it.number in visibleLookupNumbers && isUnknownEntry(it) && !it.isLookupInProgress }
+            .map { it.number }
+            .distinct()
+            .filter { shouldLookupUnknownNumber(it) }
+
+        if (pendingNumbers.isEmpty()) return
+
+        isUnknownLookupRunning = true
+        lifecycleScope.launch {
+            try {
+                processUnknownNumberLookupQueue()
+            } finally {
+                isUnknownLookupRunning = false
+                if (pendingUnknownLookupRequested) {
+                    pendingUnknownLookupRequested = false
+                    scheduleUnknownNumberLookup()
+                }
+            }
+        }
+    }
+
+    private suspend fun processUnknownNumberLookupQueue() {
+        while (true) {
+            val batch = callLogList
+                .filter { it.number in visibleLookupNumbers && isUnknownEntry(it) && !it.isLookupInProgress }
+                .map { it.number }
+                .distinct()
+                .filter { shouldLookupUnknownNumber(it) }
+                .take(UNKNOWN_LOOKUP_BATCH_SIZE)
+
+            if (batch.isEmpty()) return
+
+            markLookupState(batch, true)
+
+            val results = withContext(Dispatchers.IO) {
+                batch.associateWith { number -> fetchRemoteNameForNumber(number) }
+            }
+
+            results.forEach { (number, resolvedLookup) ->
+                searchedUnknownNumbers += number
+                if (resolvedLookup != null) {
+                    unknownLookupCache[number] = resolvedLookup
+                }
+            }
+            saveSearchedUnknownNumbers()
+
+            applyLookupResults(results)
+        }
+    }
+
+    private suspend fun fetchRemoteNameForNumber(number: String): RemoteLookupResult? {
+        val firestore = FirebaseFirestore.getInstance()
+        val documentIds = buildLookupDocumentIds(number)
+        if (documentIds.isEmpty()) return null
+
+        val userId = auth.currentUser?.uid
+        var matchedSource: String? = null
+
+        if (!userId.isNullOrBlank()) {
+            lookupUserSubcollectionName(
+                firestore,
+                userId,
+                "blocked_numbers",
+                documentIds,
+                LookupSource.BLOCKED,
+                number
+            )?.let { probe ->
+                matchedSource = matchedSource ?: probe.source
+                if (!probe.name.isNullOrBlank()) {
+                    return RemoteLookupResult(probe.name, matchedSource!!)
+                }
+            }
+            lookupUserSubcollectionName(
+                firestore,
+                userId,
+                "white_list_numbers",
+                documentIds,
+                LookupSource.WHITELIST,
+                number
+            )?.let { probe ->
+                matchedSource = matchedSource ?: probe.source
+                if (!probe.name.isNullOrBlank()) {
+                    return RemoteLookupResult(probe.name, matchedSource!!)
+                }
+            }
+        }
+
+        lookupGlobalCollectionName(firestore, "global_verifed", documentIds, LookupSource.VERIFIED, number)?.let { probe ->
+            matchedSource = matchedSource ?: probe.source
+            if (!probe.name.isNullOrBlank()) {
+                return RemoteLookupResult(probe.name, matchedSource!!)
+            }
+        }
+        lookupGlobalCollectionName(firestore, "global_verified", documentIds, LookupSource.VERIFIED, number)?.let { probe ->
+            matchedSource = matchedSource ?: probe.source
+            if (!probe.name.isNullOrBlank()) {
+                return RemoteLookupResult(probe.name, matchedSource!!)
+            }
+        }
+        lookupGlobalCollectionName(firestore, "global_spam", documentIds, LookupSource.SPAM, number)?.let { probe ->
+            matchedSource = matchedSource ?: probe.source
+            if (!probe.name.isNullOrBlank()) {
+                return RemoteLookupResult(probe.name, matchedSource!!)
+            }
+        }
+
+        lookupAllUsersContactsName(
+            firestore,
+            documentIds,
+            LookupSource.USER_CONTACT,
+            number
+        )?.let { probe ->
+            matchedSource = matchedSource ?: probe.source
+            if (!probe.name.isNullOrBlank()) {
+                return RemoteLookupResult(probe.name, matchedSource!!)
+            }
+        }
+        return matchedSource?.let { RemoteLookupResult(number, it) }
+    }
+
+    private suspend fun lookupUserSubcollectionName(
+        firestore: FirebaseFirestore,
+        userId: String,
+        subcollection: String,
+        documentIds: List<String>,
+        source: String,
+        requestedNumber: String
+    ): LookupProbeResult? {
+        val userDocIds = documentIds.flatMap { listOf(it, it.removePrefix("+")) }.distinct()
+        for (documentId in userDocIds) {
+            val snapshot = firestore
+                .collection("users")
+                .document(userId)
+                .collection(subcollection)
+                .document(documentId)
+                .get()
+                .await()
+            if (snapshot.exists()) {
+                return LookupProbeResult(
+                    name = extractResolvedName(requestedNumber, snapshot.getString("primaryName"), snapshot.getString("name")),
+                    source = source
+                )
+            }
+        }
+        return null
+    }
+
+    private suspend fun lookupGlobalCollectionName(
+        firestore: FirebaseFirestore,
+        collectionName: String,
+        documentIds: List<String>,
+        source: String,
+        requestedNumber: String
+    ): LookupProbeResult? {
+        for (documentId in documentIds) {
+            val snapshot = firestore
+                .collection(collectionName)
+                .document(documentId)
+                .get()
+                .await()
+            if (snapshot.exists()) {
+                return LookupProbeResult(
+                    name = extractResolvedName(requestedNumber, snapshot.getString("primaryName"), snapshot.getString("name")),
+                    source = source
+                )
+            }
+        }
+
+        val queryCandidates = documentIds.distinct().take(10)
+        if (queryCandidates.isEmpty()) return null
+
+        val phoneFieldMatches = firestore
+            .collection(collectionName)
+            .whereIn("phoneNumber", queryCandidates)
+            .get()
+            .await()
+        phoneFieldMatches.documents.firstOrNull()?.let { document ->
+            return LookupProbeResult(
+                name = extractResolvedName(requestedNumber, document.getString("primaryName"), document.getString("name")),
+                source = source
+            )
+        }
+
+        val legacyNumberMatches = firestore
+            .collection(collectionName)
+            .whereIn("number", queryCandidates)
+            .get()
+            .await()
+        legacyNumberMatches.documents.firstOrNull()?.let { document ->
+            return LookupProbeResult(
+                name = extractResolvedName(requestedNumber, document.getString("primaryName"), document.getString("name")),
+                source = source
+            )
+        }
+
+        return null
+    }
+
+    private suspend fun lookupAllUsersContactsName(
+        firestore: FirebaseFirestore,
+        documentIds: List<String>,
+        source: String,
+        requestedNumber: String
+    ): LookupProbeResult? {
+        val queryCandidates = documentIds
+            .flatMap { listOf(it, it.removePrefix("+")) }
+            .distinct()
+            .take(10)
+        if (queryCandidates.isEmpty()) return null
+
+        firestore.collectionGroup("contacts")
+            .whereIn("phoneNumber", queryCandidates)
+            .get()
+            .await()
+            .documents
+            .firstOrNull()
+            ?.let { document ->
+                return LookupProbeResult(
+                    name = extractResolvedName(requestedNumber, document.getString("primaryName"), document.getString("name")),
+                    source = source
+                )
+            }
+
+        firestore.collectionGroup("contacts")
+            .whereIn("number", queryCandidates)
+            .get()
+            .await()
+            .documents
+            .firstOrNull()
+            ?.let { document ->
+                return LookupProbeResult(
+                    name = extractResolvedName(requestedNumber, document.getString("primaryName"), document.getString("name")),
+                    source = source
+                )
+            }
+
+        return null
+    }
+
+    private fun extractResolvedName(requestedNumber: String, vararg candidates: String?): String? {
+        return candidates.firstNotNullOfOrNull { candidate ->
+            val trimmed = candidate?.trim().orEmpty()
+            when {
+                trimmed.isBlank() -> null
+                PhoneNumberVariants.sameNumber(trimmed, requestedNumber) -> null
+                else -> trimmed
+            }
+        }
+    }
+
+    private fun buildLookupDocumentIds(number: String): List<String> {
+        return PhoneNumberVariants.buildFirestoreDocumentIds(number)
+    }
+
+    private fun markLookupState(numbers: List<String>, inProgress: Boolean) {
+        val updatedItems = callLogList.map { item ->
+            if (item.number in numbers && isUnknownEntry(item)) {
+                item.copy(isLookupInProgress = inProgress)
+            } else {
+                item
+            }
+        }
+
+        callLogList.clear()
+        callLogList.addAll(updatedItems)
+        updateDisplayList()
+        saveCurrentCacheSnapshot()
+    }
+
+    private fun applyLookupResults(results: Map<String, RemoteLookupResult?>) {
+        val updatedItems = callLogList.map { item ->
+            val resolvedLookup = results[item.number]
+            when {
+                item.number !in results -> item
+                resolvedLookup == null -> item.copy(isLookupInProgress = false)
+                else -> item.copy(
+                    name = resolvedLookup.name,
+                    isLookupInProgress = false,
+                    lookupSource = resolvedLookup.source
+                )
+            }
+        }
+
+        callLogList.clear()
+        callLogList.addAll(updatedItems)
+        updateDisplayList()
+        saveCurrentCacheSnapshot()
+    }
+
+    private fun saveCurrentCacheSnapshot() {
+        saveCacheSnapshot(
+            CallLogCacheSnapshot(
+                latestId = cachedLatestId,
+                latestDate = cachedLatestDate,
+                logs = callLogList.toList()
+            )
+        )
+    }
+
+    private fun applyCachedLookupResolution(item: CallLogItem): CallLogItem {
+        if (!item.name.isBlank()) return item
+        val cachedLookup = unknownLookupCache[item.number] ?: return item
+        return item.copy(
+            name = cachedLookup.name,
+            lookupSource = cachedLookup.source
+        )
+    }
+
+    private fun loadSearchedUnknownNumbers() {
+        val prefs = getSharedPreferences(CACHE_PREFS, MODE_PRIVATE)
+        searchedUnknownNumbers.clear()
+        searchedUnknownNumbers.addAll(prefs.getStringSet(SEARCHED_UNKNOWN_KEY, emptySet()) ?: emptySet())
+    }
+
+    private fun saveSearchedUnknownNumbers() {
+        val prefs = getSharedPreferences(CACHE_PREFS, MODE_PRIVATE)
+        prefs.edit().putStringSet(SEARCHED_UNKNOWN_KEY, searchedUnknownNumbers.toSet()).apply()
+    }
+
+    private fun resetLookupCaches() {
+        unknownLookupCache.clear()
+        searchedUnknownNumbers.clear()
+        saveSearchedUnknownNumbers()
+        val resetItems = callLogList.map { item ->
+            if (item.lookupSource.isNullOrBlank()) {
+                item.copy(isLookupInProgress = false)
+            } else {
+                item.copy(
+                    name = "",
+                    isLookupInProgress = false,
+                    lookupSource = null
+                )
+            }
+        }
+        callLogList.clear()
+        callLogList.addAll(resetItems)
+        saveCurrentCacheSnapshot()
+        updateDisplayList()
+        rvCallLog.post { updateVisibleUnknownLookupTargets() }
+    }
+
+    private fun updateVisibleUnknownLookupTargets() {
+        val layoutManager = rvCallLog.layoutManager as? LinearLayoutManager ?: return
+        val first = layoutManager.findFirstVisibleItemPosition()
+        val last = layoutManager.findLastVisibleItemPosition()
+        if (first == RecyclerView.NO_POSITION || last == RecyclerView.NO_POSITION || callLogList.isEmpty()) {
+            visibleLookupNumbers = emptySet()
+            return
+        }
+
+        val safeFirst = first.coerceAtLeast(0)
+        val safeLast = last.coerceAtMost(callLogList.lastIndex)
+        visibleLookupNumbers = callLogList
+            .subList(safeFirst, safeLast + 1)
+            .filter { isUnknownEntry(it) }
+            .map { it.number }
+            .toSet()
+
+        rvCallLog.removeCallbacks(viewportLookupRunnable)
+        rvCallLog.post(viewportLookupRunnable)
+    }
+
+    private fun shouldLookupUnknownNumber(number: String): Boolean {
+        if (number.isBlank()) return false
+        if (searchedUnknownNumbers.contains(number)) return false
+        if (unknownLookupCache.containsKey(number)) return false
+        return true
+    }
+
+    private fun isUnknownEntry(item: CallLogItem): Boolean {
+        return item.name.isBlank() || item.name == item.number
+    }
+
+    private data class RemoteLookupResult(
+        val name: String,
+        val source: String
+    )
+
+    private data class LookupProbeResult(
+        val name: String?,
+        val source: String
+    )
+
+    private object LookupSource {
+        const val BLOCKED = "blocked"
+        const val SPAM = "spam"
+        const val WHITELIST = "whitelist"
+        const val VERIFIED = "verified"
+        const val USER_CONTACT = "user_contact"
+    }
+
+    private fun maybeBootstrapCurrentUserProfile() {
+        if (hasCheckedProfileBootstrap || pendingProfileBootstrap != null || isProfileBootstrapInProgress) return
+        val currentUser = auth.currentUser ?: return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_NUMBERS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+
+        lifecycleScope.launch {
+            isProfileBootstrapInProgress = true
+            try {
+                val bootstrap = withContext(Dispatchers.IO) {
+                    UserProfileBootstrapper.getPendingBootstrap(this@MainActivity, currentUser)
+                }
+                if (bootstrap == null) {
+                    hasCheckedProfileBootstrap = true
+                    isProfileBootstrapInProgress = false
+                    return@launch
+                }
+
+                withContext(Dispatchers.IO) {
+                    UserProfileBootstrapper.applyBootstrap(bootstrap, null)
+                }
+
+                pendingProfileBootstrap = bootstrap
+                launchPhoneNumberHint(bootstrap)
+            } catch (_: Exception) {
+                isProfileBootstrapInProgress = false
+                pendingProfileBootstrap = null
+                hasCheckedProfileBootstrap = true
+                Toast.makeText(this@MainActivity, R.string.profile_bootstrap_failed, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private val phoneNumberHintLauncher = registerForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        val bootstrap = pendingProfileBootstrap ?: run {
+            hasCheckedProfileBootstrap = true
+            return@registerForActivityResult
+        }
+
+        val selectedNumber = try {
+            val dataIntent = result.data ?: return@registerForActivityResult handlePhoneNumberHintDismissed(bootstrap)
+            Identity.getSignInClient(this).getPhoneNumberFromIntent(dataIntent)
+        } catch (_: ApiException) {
+            null
+        } catch (_: Exception) {
+            null
+        }
+        Log.d(TAG, "Phone hint resultCode=${result.resultCode} selectedNumber=$selectedNumber")
+
+        if (selectedNumber.isNullOrBlank()) {
+            Toast.makeText(this, "No number selected", Toast.LENGTH_SHORT).show()
+            handlePhoneNumberHintDismissed(bootstrap)
+            return@registerForActivityResult
+        }
+
+        lifecycleScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    UserProfileBootstrapper.applyBootstrap(bootstrap, selectedNumber)
+                }
+                Toast.makeText(this@MainActivity, "Number updated", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to apply bootstrap for selectedNumber=$selectedNumber", e)
+                Toast.makeText(this@MainActivity, R.string.profile_bootstrap_failed, Toast.LENGTH_SHORT).show()
+            } finally {
+                isProfileBootstrapInProgress = false
+                pendingProfileBootstrap = null
+                hasCheckedProfileBootstrap = true
+            }
+        }
+    }
+
+    private fun launchPhoneNumberHint(bootstrap: PendingProfileBootstrap) {
+        lifecycleScope.launch {
+            try {
+                Log.d(TAG, "Launching Google phone hint for userId=${bootstrap.userId}")
+                val request = GetPhoneNumberHintIntentRequest.builder().build()
+                val pendingIntent = Identity.getSignInClient(this@MainActivity)
+                    .getPhoneNumberHintIntent(request)
+                    .await()
+                val intentSenderRequest = IntentSenderRequest.Builder(pendingIntent).build()
+                phoneNumberHintLauncher.launch(intentSenderRequest)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to launch Google phone hint", e)
+                handlePhoneNumberHintDismissed(bootstrap)
+            }
+        }
+    }
+
+    private fun handlePhoneNumberHintDismissed(bootstrap: PendingProfileBootstrap) {
+        lifecycleScope.launch {
+            try {
+                // Keep profile basics already merged, but only persist mobile after a valid phone-hint choice.
+                Log.d(TAG, "Phone hint dismissed without a valid number")
+            } catch (e: Exception) {
+                Log.e(TAG, "Phone hint dismissal handling failed", e)
+                Toast.makeText(this@MainActivity, R.string.profile_bootstrap_failed, Toast.LENGTH_SHORT).show()
+            } finally {
+                isProfileBootstrapInProgress = false
+                pendingProfileBootstrap = null
+                hasCheckedProfileBootstrap = false
+            }
+        }
+    }
+
+    private fun switchTab(tab: String) {
         activeTab = tab
-        
+
         val tabRecents = findViewById<LinearLayout>(R.id.tabRecents)
         val tabBlockList = findViewById<LinearLayout>(R.id.tabBlockList)
         val tabWhiteList = findViewById<LinearLayout>(R.id.tabWhiteList)
         val tabProfile = findViewById<LinearLayout>(R.id.tabProfile)
 
-        // Reset all tabs
-        val tabs = listOf(tabRecents, tabBlockList, tabWhiteList, tabProfile)
-        tabs.forEach { t ->
+        listOf(tabRecents, tabBlockList, tabWhiteList, tabProfile).forEach { t ->
             t.setBackgroundColor(Color.TRANSPARENT)
             val icon = t.getChildAt(0) as ImageView
             val label = t.getChildAt(1) as TextView
-            icon.imageTintList = ColorStateList.valueOf(Color.WHITE)
+            icon.imageTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
             label.setTextColor(Color.WHITE)
         }
 
-        // Highlight active tab
-        val activeView = when(tab) {
+        val activeView = when (tab) {
             "Recents" -> tabRecents
             "BlockList" -> tabBlockList
             "WhiteList" -> tabWhiteList
@@ -451,433 +1247,291 @@ class MainActivity : AppCompatActivity() {
         }
         activeView.setBackgroundColor(getColor(R.color.brand_red))
 
+        when (tab) {
+            "BlockList" -> syncLookupCollectionIntoUi("blocked_numbers", LookupSource.BLOCKED)
+            "WhiteList" -> syncLookupCollectionIntoUi("white_list_numbers", LookupSource.WHITELIST)
+        }
         updateDisplayList()
     }
 
-    private fun normalizeNumber(number: String): String {
-        val digitsOnly = number.replace("[^0-9]".toRegex(), "")
-        return when {
-            digitsOnly.length == 10 -> "91$digitsOnly"
-            digitsOnly.length == 11 && digitsOnly.startsWith("0") -> "91${digitsOnly.substring(1)}"
-            digitsOnly.length == 12 && digitsOnly.startsWith("91") -> digitsOnly
-            else -> digitsOnly
-        }
-    }
-
     private fun updateDisplayList() {
-        if (!::callLogAdapter.isInitialized) return
-
-        val displayList = when (activeTab) {
-            "BlockList" -> {
-                callLogList
-                    .filter { blockedNumbersSet.contains(normalizeNumber(it.number)) }
-                    .distinctBy { normalizeNumber(it.number) }
-            }
-            "WhiteList" -> {
-                callLogList
-                    .filter { whiteListSet.contains(normalizeNumber(it.number)) }
-                    .distinctBy { normalizeNumber(it.number) }
-            }
+        val items = when (activeTab) {
+            "BlockList" -> blockListItems
+            "WhiteList" -> whiteListItems
             else -> callLogList
         }
-
-        callLogAdapter.updateData(displayList)
+        callLogAdapter.updateData(items)
     }
 
-    private fun loadBlockedNumbersCache() {
-        val prefs = getSharedPreferences("BlockedNumbersCache", Context.MODE_PRIVATE)
-        val cachedSet = prefs.getStringSet("blocked_set", emptySet())
-        blockedNumbersSet.clear()
-        blockedNumbersSet.addAll(cachedSet ?: emptySet())
-    }
+    private fun syncLookupCollectionIntoUi(
+        subcollection: String,
+        source: String,
+        showCompletionToast: Boolean = false
+    ) {
+        val userId = auth.currentUser?.uid ?: return
+        if (isListTabSyncInProgress) return
+        isListTabSyncInProgress = true
 
-    private fun saveBlockedNumbersCache() {
-        val prefs = getSharedPreferences("BlockedNumbersCache", Context.MODE_PRIVATE)
-        prefs.edit { putStringSet("blocked_set", blockedNumbersSet) }
-    }
-
-    private fun setupBlockedNumbersListener() {
-        val uid = auth.currentUser?.uid ?: return
-        blockedNumbersListener = db.collection("users").document(uid).collection("blocked_numbers")
-            .addSnapshotListener { snapshots, e ->
-                if (e != null) return@addSnapshotListener
-                
-                val newBlockedSet = snapshots?.documents?.mapNotNull { it.id }?.toMutableSet() ?: mutableSetOf()
-                if (newBlockedSet != blockedNumbersSet) {
-                    blockedNumbersSet.clear()
-                    blockedNumbersSet.addAll(newBlockedSet)
-                    saveBlockedNumbersCache()
-                    updateLogsStatus()
-                }
-            }
-    }
-
-    private fun loadWhiteListCache() {
-        val prefs = getSharedPreferences("WhitelistCache", Context.MODE_PRIVATE)
-        val cachedSet = prefs.getStringSet("white_set", emptySet())
-        whiteListSet.clear()
-        whiteListSet.addAll(cachedSet ?: emptySet())
-    }
-
-    private fun saveWhiteListCache() {
-        val prefs = getSharedPreferences("WhitelistCache", Context.MODE_PRIVATE)
-        prefs.edit { putStringSet("white_set", whiteListSet) }
-    }
-
-    private fun setupWhiteListListener() {
-        val uid = auth.currentUser?.uid ?: return
-        whiteListListener = db.collection("users").document(uid).collection("white_list_numbers")
-            .addSnapshotListener { snapshots, e ->
-                if (e != null) return@addSnapshotListener
-                
-                val newWhiteSet = snapshots?.documents?.mapNotNull { it.id }?.toMutableSet() ?: mutableSetOf()
-                if (newWhiteSet != whiteListSet) {
-                    whiteListSet.clear()
-                    whiteListSet.addAll(newWhiteSet)
-                    saveWhiteListCache()
-                    updateLogsStatus()
-                }
-            }
-    }
-
-    private fun updateLogsStatus() {
-        var changed = false
-        callLogList.forEach { item ->
-            val cleanNum = normalizeNumber(item.number)
-            val isBlocked = blockedNumbersSet.contains(cleanNum)
-            val isVerified = whiteListSet.contains(cleanNum)
-            val isSpam = globalSpamSet.contains(cleanNum)
-            
-            // Check if name has changed in cache
-            val dbName = dbNameCache[cleanNum]
-            if (item.dbName != dbName) {
-                item.dbName = dbName
-                changed = true
-            }
-            
-            if (item.isBlockedLocally != isBlocked || item.isGlobalSpam != isSpam || item.isWhitelisted != isVerified) {
-                item.isBlockedLocally = isBlocked
-                item.isWhitelisted = isVerified
-                item.isGlobalSpam = isSpam
-                changed = true
-            }
-        }
-        if (changed || activeTab != "Recents") {
-            updateDisplayList()
-        }
-    }
-
-    private fun scheduleContactSync() {
-        val constraints = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
-            .build()
-
-        val syncRequest = PeriodicWorkRequestBuilder<ContactSyncWorker>(1, TimeUnit.HOURS)
-            .setConstraints(constraints)
-            .build()
-
-        WorkManager.getInstance(this).enqueueUniquePeriodicWork(
-            "ContactSync",
-            ExistingPeriodicWorkPolicy.KEEP,
-            syncRequest
-        )
-
-        val immediateRequest = OneTimeWorkRequestBuilder<ContactSyncWorker>()
-            .setConstraints(constraints)
-            .build()
-
-        WorkManager.getInstance(this).enqueueUniqueWork(
-            "ContactSyncImmediate",
-            ExistingWorkPolicy.REPLACE,
-            immediateRequest
-        )
-    }
-
-    private fun loadFromCache() {
-        val prefs = getSharedPreferences("CallLogCache", Context.MODE_PRIVATE)
-        val json = prefs.getString("logs", null)
-        if (json != null) {
-            try {
-                val type = object : TypeToken<List<CallLogItem>>() {}.type
-                val cachedList: List<CallLogItem> = gson.fromJson(json, type)
-                callLogList.clear()
-                callLogList.addAll(cachedList)
-                globalSpamSet.clear()
-                globalSpamSet.addAll(cachedList.filter { it.isGlobalSpam }.map { normalizeNumber(it.number) })
-                isDataReady = true
-            } catch (e: Exception) { }
-        }
-    }
-
-    private fun saveToCache(list: List<CallLogItem>) {
-        val prefs = getSharedPreferences("CallLogCache", Context.MODE_PRIVATE)
-        val json = gson.toJson(list)
-        prefs.edit { putString("logs", json) }
-    }
-
-    private fun loadDbNameCache() {
-        val prefs = getSharedPreferences("DbNameCache", Context.MODE_PRIVATE)
-        val json = prefs.getString("names", null)
-        if (json != null) {
-            try {
-                val type = object : TypeToken<Map<String, String>>() {}.type
-                val cachedMap: Map<String, String> = gson.fromJson(json, type)
-                dbNameCache.clear()
-                dbNameCache.putAll(cachedMap)
-            } catch (e: Exception) { }
-        }
-    }
-
-    private fun saveDbNameCache() {
-        val prefs = getSharedPreferences("DbNameCache", Context.MODE_PRIVATE)
-        val json = gson.toJson(dbNameCache)
-        prefs.edit { putString("names", json) }
-    }
-
-    private fun checkPermissionAndLoadLogs() {
-        val callLogPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CALL_LOG)
-        val contactsPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS)
-
-        if (callLogPermission == PackageManager.PERMISSION_GRANTED && contactsPermission == PackageManager.PERMISSION_GRANTED) {
-            loadCallLogInBackground()
-        } else {
-            requestPermissionLauncher.launch(
-                arrayOf(Manifest.permission.READ_CALL_LOG, Manifest.permission.READ_CONTACTS)
-            )
-        }
-    }
-
-    private fun loadCallLogInBackground() {
-        if (callLogList.isEmpty()) {
-            startLoadingAnimation()
-        }
-        
         lifecycleScope.launch(Dispatchers.IO) {
-            val tempList = mutableListOf<CallLogItem>()
-            val cursor: Cursor? = contentResolver.query(
-                CallLog.Calls.CONTENT_URI,
-                null, null, null, CallLog.Calls.DATE + " DESC"
-            )
-
-            cursor?.use {
-                val numIdx = it.getColumnIndex(CallLog.Calls.NUMBER)
-                val typeIdx = it.getColumnIndex(CallLog.Calls.TYPE)
-                val dateIdx = it.getColumnIndex(CallLog.Calls.DATE)
-                val accIdx = it.getColumnIndex(CallLog.Calls.PHONE_ACCOUNT_ID)
-
-                while (it.moveToNext()) {
-                    val number = it.getString(numIdx) ?: ""
-                    val type = it.getInt(typeIdx)
-                    val date = it.getLong(dateIdx)
-                    val subscriptionId = try { it.getInt(accIdx) } catch (e: Exception) { -1 }
-
-                    val (liveName, livePhoto) = getContactDetails(number)
-
-                    val callTypeStr = when (type) {
-                        CallLog.Calls.INCOMING_TYPE -> "Incoming"
-                        CallLog.Calls.OUTGOING_TYPE -> "Outgoing"
-                        CallLog.Calls.MISSED_TYPE -> "Missed"
-                        else -> "Unknown"
-                    }
-                    val simId = if (subscriptionId <= 0) 1 else 2
-                    
-                    val cleanNum = normalizeNumber(number)
-                    val isBlocked = blockedNumbersSet.contains(cleanNum)
-                    val isVerified = whiteListSet.contains(cleanNum)
-                    val isSpam = globalSpamSet.contains(cleanNum)
-                    val dbName = dbNameCache[cleanNum]
-                    
-                    tempList.add(CallLogItem(liveName ?: "", number, callTypeStr, date, simId, livePhoto, isBlocked, dbName, isSpam, isVerified))
-                }
-            }
-
-            if (tempList.isNotEmpty()) {
-                saveToCache(tempList)
-            }
-
+            val entries = fetchLookupCollectionEntries(userId, subcollection, source)
             withContext(Dispatchers.Main) {
-                stopLoadingAnimation()
-                callLogList.clear()
-                callLogList.addAll(tempList)
-                updateDisplayList()
-                isDataReady = true
-                
-                fetchGlobalData()
+                applyLookupCollectionEntries(entries, source)
+                if (showCompletionToast) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        getString(R.string.refreshed_tab, getTabDisplayName(activeTab)),
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+                isListTabSyncInProgress = false
             }
         }
     }
 
-    private fun fetchGlobalData() {
-        val unknownNumbers = callLogList
-            .filter { it.name.isNullOrEmpty() || it.name == it.number }
-            .map { normalizeNumber(it.number) }
-            .filter { it.isNotEmpty() && !dbNameCache.containsKey(it) }
-            .distinct()
+    private suspend fun fetchLookupCollectionEntries(
+        userId: String,
+        subcollection: String,
+        source: String
+    ): List<CallLogItem> {
+        val snapshots = FirebaseFirestore.getInstance()
+            .collection("users")
+            .document(userId)
+            .collection(subcollection)
+            .get()
+            .await()
 
-        if (unknownNumbers.isEmpty()) return
+        return snapshots.documents.mapNotNull { document ->
+            val number = normalizeLookupNumber(
+                document.getString("phoneNumber"),
+                document.getString("number"),
+                document.id
+            ) ?: return@mapNotNull null
 
-        lifecycleScope.launch(Dispatchers.IO) {
-            unknownNumbers.chunked(30).forEach { chunk ->
-                val userNumberVariants = chunk.flatMap { buildLookupVariants(it) }.distinct().take(30)
+            val name = extractResolvedName(
+                number,
+                document.getString("primaryName"),
+                document.getString("name")
+            ) ?: number
 
-                // 1. global_spam
-                try {
-                    val spamSnap = db.collection("global_spam")
-                        .whereIn(FieldPath.documentId(), chunk)
-                        .get().await()
-                    
-                    spamSnap.documents.forEach { doc ->
-                        val cleanNum = doc.id
-                        val name = doc.getString("primaryName") ?: doc.getString("name")
-                        if (!name.isNullOrEmpty()) {
-                            globalSpamSet.add(cleanNum)
-                            val isBlocked = blockedNumbersSet.contains(cleanNum)
-                            val finalName = if (isBlocked) name else "$name - online"
-                            val isVerified = doc.getBoolean("isVerifiedSpam") ?: false
-                            dbNameCache[cleanNum] = finalName
-                            withContext(Dispatchers.Main) {
-                                updateItemStatus(cleanNum, finalName, isVerified)
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    withContext(Dispatchers.Main) {
-                        FirestoreUi.handleFailure(this@MainActivity, e, "MainActivity")
-                    }
+            CallLogItem(
+                name = name,
+                number = number,
+                type = "Unknown",
+                time = LIST_TAB_PLACEHOLDER_TIME,
+                lookupSource = source
+            )
+        }.sortedBy { it.name.lowercase() }
+    }
+
+    private fun applyLookupCollectionEntries(entries: List<CallLogItem>, source: String) {
+        val previousNumbers = when (source) {
+            LookupSource.BLOCKED -> blockListItems.map { it.number }.toSet()
+            LookupSource.WHITELIST -> whiteListItems.map { it.number }.toSet()
+            else -> emptySet()
+        }
+
+        when (source) {
+            LookupSource.BLOCKED -> {
+                blockListItems.clear()
+                blockListItems.addAll(entries)
+            }
+            LookupSource.WHITELIST -> {
+                whiteListItems.clear()
+                whiteListItems.addAll(entries)
+            }
+        }
+
+        val lookupMap = entries.associate { entry ->
+            entry.number to RemoteLookupResult(entry.name, source)
+        }
+        val removedNumbers = previousNumbers - lookupMap.keys
+
+        removedNumbers.forEach { number ->
+            if (unknownLookupCache[number]?.source == source) {
+                unknownLookupCache.remove(number)
+            }
+            searchedUnknownNumbers.remove(number)
+        }
+
+        unknownLookupCache.putAll(lookupMap)
+        searchedUnknownNumbers.addAll(lookupMap.keys)
+        saveSearchedUnknownNumbers()
+
+        val updatedRecents = callLogList.map { item ->
+            when {
+                item.number in removedNumbers && item.lookupSource == source -> {
+                    item.copy(
+                        name = "",
+                        isLookupInProgress = false,
+                        lookupSource = null
+                    )
                 }
-
-                // 2. users
-                try {
-                    if (userNumberVariants.isNotEmpty()) {
-                        val userSnap = db.collection("users")
-                            .whereIn("mobileNumber", userNumberVariants)
-                            .get().await()
-
-                        userSnap.documents.forEach { doc ->
-                            val cleanNum = normalizeNumber(doc.getString("mobileNumber") ?: "")
-                            if (cleanNum.isNotEmpty() && !dbNameCache.containsKey(cleanNum)) {
-                                val name = doc.getString("fullName") ?: doc.getString("name")
-                                if (!name.isNullOrEmpty()) {
-                                    val isBlocked = blockedNumbersSet.contains(cleanNum)
-                                    val finalName = if (isBlocked) name else "$name - online"
-                                    dbNameCache[cleanNum] = finalName
-                                    withContext(Dispatchers.Main) {
-                                        updateItemStatus(cleanNum, finalName, false)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    withContext(Dispatchers.Main) {
-                        FirestoreUi.handleFailure(this@MainActivity, e, "MainActivity")
-                    }
-                }
-
-                // 3. Community Contacts
-                try {
-                    val contactSnap = db.collectionGroup("contacts")
-                        .whereIn("number", chunk)
-                        .get().await()
-                    
-                    contactSnap.documents.forEach { doc ->
-                        val cleanNum = normalizeNumber(doc.getString("number") ?: "")
-                        if (cleanNum.isNotEmpty() && !dbNameCache.containsKey(cleanNum)) {
-                            val name = doc.getString("name")
-                            if (!name.isNullOrEmpty()) {
-                                val isBlocked = blockedNumbersSet.contains(cleanNum)
-                                val finalName = if (isBlocked) name else "$name - online"
-                                dbNameCache[cleanNum] = finalName
-                                withContext(Dispatchers.Main) {
-                                    updateItemStatus(cleanNum, finalName, false)
-                                }
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    withContext(Dispatchers.Main) {
-                        FirestoreUi.handleFailure(this@MainActivity, e, "MainActivity")
-                    }
+                else -> {
+                    val resolved = lookupMap[item.number] ?: return@map item
+                    item.copy(
+                        name = resolved.name,
+                        isLookupInProgress = false,
+                        lookupSource = resolved.source
+                    )
                 }
             }
         }
+
+        callLogList.clear()
+        callLogList.addAll(updatedRecents)
+        saveCurrentCacheSnapshot()
+
+        updateDisplayList()
+        rvCallLog.post { updateVisibleUnknownLookupTargets() }
     }
 
-    private fun updateItemStatus(number: String, name: String?, isSpam: Boolean) {
-        var changed = false
-        callLogList.forEach { item ->
-            if (normalizeNumber(item.number) == number) {
-                if (name != null) item.dbName = name
-                item.isGlobalSpam = isSpam || globalSpamSet.contains(number)
-                changed = true
+    private fun normalizeLookupNumber(vararg candidates: String?): String? {
+        val raw = candidates.firstNotNullOfOrNull { it?.trim()?.takeIf(String::isNotBlank) } ?: return null
+        return PhoneNumberVariants.toIndianMobilePlus(raw)
+            ?: PhoneNumberVariants.digitsOnly(raw).takeIf { it.isNotBlank() }
+    }
+
+    private fun getTabDisplayName(tab: String): String {
+        return when (tab) {
+            "BlockList" -> getString(R.string.tab_block_list)
+            "WhiteList" -> getString(R.string.tab_white_list)
+            else -> getString(R.string.tab_recents)
+        }
+    }
+
+    private fun showAccountDialog() {
+        val user = auth.currentUser
+        val message = "${user?.displayName ?: getString(R.string.default_user_name)}\n${user?.email ?: getString(R.string.no_email_available)}"
+        AlertDialog.Builder(this)
+            .setTitle(R.string.account_status_label)
+            .setMessage(message)
+            .setPositiveButton(R.string.logout) { _, _ ->
+                auth.signOut()
+                navigateToLogin()
             }
-        }
-        if (changed) {
-            saveDbNameCache()
-            saveToCache(callLogList)
-            updateDisplayList()
-        }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
     }
 
-    private fun buildLookupVariants(number: String): List<String> {
-        if (number.isBlank()) return emptyList()
-
-        val variants = linkedSetOf(number, "+$number")
-        if (number.startsWith("91") && number.length == 12) {
-            val local = number.substring(2)
-            variants.add(local)
-            variants.add("0$local")
-            variants.add("+91$local")
-        }
-        return variants.toList()
-    }
-
-    private fun isValidMobileNumber(number: String): Boolean {
-        return number.length == 12 && number.startsWith("91") && number.substring(2).all { it.isDigit() }
-    }
-
-    private fun saveProfileCache(profile: UserProfileCache) {
-        val prefs = getSharedPreferences("UserProfileCache", Context.MODE_PRIVATE)
-        prefs.edit {
-            putString("uid", profile.uid)
-            putString("fullName", profile.fullName)
-            putString("email", profile.email)
-            putString("mobileNumber", profile.mobileNumber)
-            putString("role", profile.role)
-        }
-    }
-
-    private fun loadCachedProfile(uid: String): UserProfileCache? {
-        val prefs = getSharedPreferences("UserProfileCache", Context.MODE_PRIVATE)
-        if (prefs.getString("uid", null) != uid) return null
-
-        return UserProfileCache(
-            uid = uid,
-            fullName = prefs.getString("fullName", "User") ?: "User",
-            email = prefs.getString("email", "") ?: "",
-            mobileNumber = prefs.getString("mobileNumber", "") ?: "",
-            role = prefs.getString("role", "Guest") ?: "Guest"
+    private fun getMissingRuntimePermissions(): List<String> {
+        val permissions = mutableListOf(
+            Manifest.permission.READ_CALL_LOG,
+            Manifest.permission.READ_CONTACTS,
+            Manifest.permission.READ_PHONE_STATE,
+            Manifest.permission.ANSWER_PHONE_CALLS
         )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            permissions += Manifest.permission.READ_PHONE_NUMBERS
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions += Manifest.permission.POST_NOTIFICATIONS
+        }
+        return permissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
     }
 
+    private fun showAppSettingsDialog() {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.permission_denied_permanent_title)
+            .setMessage(R.string.permission_denied_permanent_message)
+            .setPositiveButton(R.string.settings_label) { _, _ ->
+                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = Uri.fromParts("package", packageName, null)
+                }
+                startActivity(intent)
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
 
-    private fun getContactDetails(phoneNumber: String): Pair<String?, String?> {
-        val uri = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(phoneNumber))
-        val projection = arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME, ContactsContract.PhoneLookup.PHOTO_URI)
-        return try {
-            contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val name = cursor.getString(0)
-                    val photo = cursor.getString(1)
-                    Pair(name, photo)
-                } else Pair(null, null)
-            } ?: Pair(null, null)
-        } catch (e: Exception) { Pair(null, null) }
+    private fun showOverlayDialog() {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.overlay_permission_title)
+            .setMessage(R.string.overlay_permission_message)
+            .setPositiveButton(R.string.enable) { _, _ ->
+                startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:$packageName")
+                    )
+                )
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
     }
 
     private fun navigateToLogin() {
-        isDataReady = true
         startActivity(Intent(this, LoginActivity::class.java))
         finish()
+    }
+
+    private fun syncContactsToDb(force: Boolean = false) {
+        val userId = auth.currentUser?.uid ?: return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+            return
+        }
+        lifecycleScope.launch {
+            try {
+                ContactSyncManager.syncIfNeeded(this@MainActivity, userId, force)
+            } catch (e: Exception) {
+                FirestoreUi.handleFailure(this@MainActivity, e, "ContactSyncManager")
+            }
+        }
+    }
+
+    private fun handleCallStateChanged(state: Int) {
+        val previousState = lastCallState
+        lastCallState = state
+
+        if ((previousState == TelephonyManager.CALL_STATE_RINGING || previousState == TelephonyManager.CALL_STATE_OFFHOOK) &&
+            state == TelephonyManager.CALL_STATE_IDLE) {
+            observerHandler.removeCallbacks(callEndedRefreshRunnable)
+            observerHandler.postDelayed(callEndedRefreshRunnable, CALL_END_REFRESH_DELAY_MS)
+        }
+    }
+
+    private fun registerCallStateListenerIfPossible() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            callStateCallback?.let {
+                telephonyManager?.registerTelephonyCallback(mainExecutor, it)
+            }
+        }
+    }
+
+    private fun unregisterCallStateListener() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            callStateCallback?.let {
+                runCatching { telephonyManager?.unregisterTelephonyCallback(it) }
+            }
+        }
+    }
+
+    private fun loadCacheSnapshot(): CallLogCacheSnapshot? {
+        val prefs = getSharedPreferences(CACHE_PREFS, MODE_PRIVATE)
+        val json = prefs.getString(CACHE_KEY, null) ?: return null
+        return try {
+            gson.fromJson(json, object : TypeToken<CallLogCacheSnapshot>() {}.type)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun saveCacheSnapshot(snapshot: CallLogCacheSnapshot) {
+        val prefs = getSharedPreferences(CACHE_PREFS, MODE_PRIVATE)
+        prefs.edit().putString(CACHE_KEY, gson.toJson(snapshot)).apply()
+    }
+
+    override fun onDestroy() {
+        if (::loadingAnimator.isInitialized) {
+            loadingAnimator.cancel()
+        }
+        observerHandler.removeCallbacksAndMessages(null)
+        unregisterCallStateListener()
+        pollHandler.removeCallbacksAndMessages(null)
+        super.onDestroy()
     }
 }

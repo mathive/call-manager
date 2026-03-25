@@ -52,7 +52,7 @@ class SearchActivity : AppCompatActivity() {
     private var remoteAdapter: CallLogAdapter? = null
     private val localResults = mutableListOf<CallLogItem>()
     private val remoteResults = mutableListOf<CallLogItem>()
-    
+
     private var searchJob: Job? = null
     private var remoteSearchJob: Job? = null
     private val db = FirebaseFirestore.getInstance()
@@ -69,7 +69,6 @@ class SearchActivity : AppCompatActivity() {
         setupListeners()
         fetchAdminStatus()
 
-        // Focus and show keyboard
         etSearch.requestFocus()
         val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
         imm.showSoftInput(etSearch, InputMethodManager.SHOW_IMPLICIT)
@@ -83,8 +82,7 @@ class SearchActivity : AppCompatActivity() {
     private fun fetchAdminStatus() {
         val uid = auth.currentUser?.uid ?: return
         db.collection("users").document(uid).get().addOnSuccessListener { doc ->
-            isAdmin = doc.getString("role") == "Admin"
-            Log.d("SearchActivity", "Admin Status Loaded: $isAdmin")
+            isAdmin = doc.getString("role").equals("Admin", ignoreCase = true)
             val currentQuery = etSearch.text.toString()
             if (currentQuery.length >= 2) {
                 updateRemoteActionUI(currentQuery)
@@ -122,12 +120,12 @@ class SearchActivity : AppCompatActivity() {
 
     private fun setupListeners() {
         etSearch.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                 isShowingAllLocal = false
                 performSearch(s.toString())
             }
-            override fun afterTextChanged(s: Editable?) {}
+            override fun afterTextChanged(s: Editable?) = Unit
         })
 
         llRemoteSearchAction.setOnClickListener {
@@ -146,14 +144,14 @@ class SearchActivity : AppCompatActivity() {
     private fun performSearch(query: String) {
         searchJob?.cancel()
         val cleanQuery = query.trim()
-        
+
         if (cleanQuery.length < 2) {
             clearResults()
             return
         }
 
         searchJob = lifecycleScope.launch {
-            delay(300) // Debounce
+            delay(300)
             searchLocalContacts(cleanQuery)
             withContext(Dispatchers.Main) {
                 updateRemoteActionUI(cleanQuery)
@@ -162,26 +160,21 @@ class SearchActivity : AppCompatActivity() {
     }
 
     private fun updateRemoteActionUI(query: String) {
-        // Requirement: 
-        // 1. Admin can search anything (characters or short numbers like 9988).
-        // 2. Guest can ONLY search if it's a valid number (at least 10 digits).
-        
         val digitsOnly = query.filter { it.isDigit() }
         val isFullNumber = digitsOnly.length >= 10
         val isNumberQuery = query.all { it.isDigit() || it == '+' || it == ' ' }
 
         val shouldShowRemoteAction = if (isAdmin) {
-            true // Admin can search any query >= 2 chars
+            true
         } else {
-            // Guest can only search full numbers
-            isNumberQuery && isFullNumber
+            query.length >= 2
         }
-        
+
         if (shouldShowRemoteAction) {
             tvRemoteSearchLabel.text = getString(R.string.remote_search_prompt, query)
             llRemoteSearchAction.visibility = View.VISIBLE
             tvRemoteHeader.visibility = View.VISIBLE
-            
+
             if (remoteSearchJob?.isActive != true) {
                 ivRemoteIcon.visibility = View.VISIBLE
                 pbRemoteSearch.visibility = View.GONE
@@ -208,21 +201,32 @@ class SearchActivity : AppCompatActivity() {
             val selectionArgs = arrayOf("%$query%", "%$query%")
 
             try {
-                contentResolver.query(uri, projection, selection, selectionArgs, "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} ASC")?.use { cursor ->
-                    val nameIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
-                    val numIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
-                    val photoIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.PHOTO_URI)
+                contentResolver.query(uri, projection, selection, selectionArgs, "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} ASC")
+                    ?.use { cursor ->
+                        val nameIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+                        val numIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+                        val photoIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.PHOTO_URI)
 
-                    var count = 0
-                    while (cursor.moveToNext()) {
-                        val name = cursor.getString(nameIdx)
-                        val number = cursor.getString(numIdx)
-                        val photo = cursor.getString(photoIdx)
-                        list.add(CallLogItem(name, number, "", 0, 1, photo))
-                        count++
-                        if (!isShowingAllLocal && count >= 5) break
+                        var count = 0
+                        while (cursor.moveToNext()) {
+                            val name = cursor.getString(nameIdx).orEmpty()
+                            val number = cursor.getString(numIdx).orEmpty()
+                            val photo = cursor.getString(photoIdx)
+                            list.add(
+                                CallLogItem(
+                                    name = name,
+                                    number = number,
+                                    type = "Unknown",
+                                    time = 0L,
+                                    simId = 1,
+                                    photoUri = photo,
+                                    lookupSource = "user_contact"
+                                )
+                            )
+                            count++
+                            if (!isShowingAllLocal && count >= 5) break
+                        }
                     }
-                }
             } catch (e: Exception) {
                 Log.e("SearchActivity", "Local contact search failed", e)
             }
@@ -233,7 +237,7 @@ class SearchActivity : AppCompatActivity() {
             localResults.clear()
             localResults.addAll(results)
             localAdapter?.updateData(results)
-            
+
             tvContactsHeader.visibility = if (results.isNotEmpty()) View.VISIBLE else View.GONE
             btnShowMore.visibility = if (results.size >= 5 && !isShowingAllLocal) View.VISIBLE else View.GONE
             divider.visibility = if (results.isNotEmpty()) View.VISIBLE else View.GONE
@@ -243,12 +247,11 @@ class SearchActivity : AppCompatActivity() {
     private fun performRemoteDBSearch(query: String) {
         remoteSearchJob?.cancel()
         val cleanQuery = query.trim()
-        
+
         val digitsOnly = cleanQuery.filter { it.isDigit() }
         val isFullNumber = digitsOnly.length >= 10
         val isNumberQuery = cleanQuery.all { it.isDigit() || it == '+' || it == ' ' }
 
-        // Final security check
         if (!isAdmin && (!isNumberQuery || !isFullNumber)) {
             Toast.makeText(this, R.string.valid_ten_digit_required, Toast.LENGTH_SHORT).show()
             return
@@ -257,7 +260,7 @@ class SearchActivity : AppCompatActivity() {
         pbRemoteSearch.visibility = View.VISIBLE
         ivRemoteIcon.visibility = View.GONE
         llRemoteSearchAction.isEnabled = false
-        
+
         remoteResults.clear()
         remoteAdapter?.updateData(emptyList())
 
@@ -265,7 +268,8 @@ class SearchActivity : AppCompatActivity() {
             val results = withContext(Dispatchers.IO) {
                 val list = mutableListOf<CallLogItem>()
                 val searchTerms = mutableListOf<String>()
-                
+                val numberVariants = if (isNumberQuery) buildNumberSearchVariants(cleanQuery) else emptyList()
+
                 searchTerms.add(cleanQuery)
                 if (isAdmin && !isNumberQuery) {
                     searchTerms.add(cleanQuery.uppercase(Locale.getDefault()))
@@ -277,31 +281,70 @@ class SearchActivity : AppCompatActivity() {
                 }
 
                 try {
+                    if (numberVariants.isNotEmpty()) {
+                        val userNumberFields = listOf("mobile", "mobileNumber")
+                        for (field in userNumberFields) {
+                            val userSnap = db.collection("users")
+                                .whereIn(field, numberVariants)
+                                .limit(10)
+                                .get()
+                                .await()
+                            list.addAll(userSnap.documents.mapNotNull { mapToCallLogItem(it, "verified") })
+                        }
+
+                        val spamDocSnap = db.collection("global_spam")
+                            .whereIn(FieldPath.documentId(), numberVariants)
+                            .limit(10)
+                            .get()
+                            .await()
+                        list.addAll(spamDocSnap.documents.mapNotNull { mapToCallLogItem(it, "spam") })
+
+                        val spamNumberFields = listOf("phoneNumber", "number")
+                        for (field in spamNumberFields) {
+                            val spamSnap = db.collection("global_spam")
+                                .whereIn(field, numberVariants)
+                                .limit(10)
+                                .get()
+                                .await()
+                            list.addAll(spamSnap.documents.mapNotNull { mapToCallLogItem(it, "spam") })
+                        }
+
+                        val contactNumberFields = listOf("phoneNumber", "number")
+                        for (field in contactNumberFields) {
+                            val contactSnap = db.collectionGroup("contacts")
+                                .whereIn(field, numberVariants)
+                                .limit(30)
+                                .get()
+                                .await()
+                            list.addAll(contactSnap.documents.mapNotNull { mapToCallLogItem(it, "user_contact") })
+                        }
+                    }
+
                     for (term in searchTerms) {
-                        // 1. Users Collection
                         val userFields = if (isAdmin && !isNumberQuery) {
-                            listOf("fullName", "name")
+                            listOf("name")
                         } else {
-                            listOf("mobileNumber")
+                            listOf("mobile", "mobileNumber")
                         }
 
                         for (field in userFields) {
-                            val snap: QuerySnapshot = db.collection("users")
+                            val snap = db.collection("users")
                                 .whereGreaterThanOrEqualTo(field, term)
                                 .whereLessThanOrEqualTo(field, term + "\uf8ff")
-                                .limit(10).get().await()
-                            list.addAll(snap.documents.map { mapToCallLogItem(it) })
+                                .limit(10)
+                                .get()
+                                .await()
+                            list.addAll(snap.documents.mapNotNull { mapToCallLogItem(it, "verified") })
                         }
 
-                        // 2. Global Spam Collection
                         val spamFields = if (isAdmin && !isNumberQuery) {
-                            listOf("primaryName", "name")
+                            listOf("primaryName", "names")
                         } else {
                             listOf("documentId")
                         }
 
                         for (field in spamFields) {
-                            val snap = if (field == "documentId") {
+                            val spamQuery = if (field == "documentId") {
                                 db.collection("global_spam")
                                     .whereGreaterThanOrEqualTo(FieldPath.documentId(), term)
                                     .whereLessThanOrEqualTo(FieldPath.documentId(), term + "\uf8ff")
@@ -310,35 +353,26 @@ class SearchActivity : AppCompatActivity() {
                                     .whereGreaterThanOrEqualTo(field, term)
                                     .whereLessThanOrEqualTo(field, term + "\uf8ff")
                             }
-                            val snapResult = snap.limit(10).get().await()
-                            list.addAll(snapResult.documents.map { mapToCallLogItem(it) })
+                            val snapResult = spamQuery.limit(10).get().await()
+                            list.addAll(snapResult.documents.mapNotNull { mapToCallLogItem(it, "spam") })
                         }
 
-                        // 3. Collection Group 'contacts'
                         val contactFields = if (isAdmin && !isNumberQuery) listOf("name") else listOf("number")
                         for (field in contactFields) {
                             try {
                                 val contactSnap: QuerySnapshot = db.collectionGroup("contacts")
                                     .whereGreaterThanOrEqualTo(field, term)
                                     .whereLessThanOrEqualTo(field, term + "\uf8ff")
-                                    .limit(30).get().await()
-                                list.addAll(contactSnap.documents.map { mapToCallLogItem(it) })
+                                    .limit(30)
+                                    .get()
+                                    .await()
+                                list.addAll(contactSnap.documents.mapNotNull { mapToCallLogItem(it, "user_contact") })
                             } catch (e: Exception) {
                                 Log.e("SearchActivity", "CollectionGroup search failed for $field", e)
                             }
                         }
-                        
+
                         if (list.size >= 50) break
-                    }
-                    
-                    // Standard Indian number fallback (Add +91 if missing) for Guests or number searches
-                    if (isNumberQuery && list.isEmpty() && !cleanQuery.startsWith("+") && digitsOnly.length == 10) {
-                        val withPrefix = "+91$cleanQuery"
-                        val snapGroup: QuerySnapshot = db.collectionGroup("contacts")
-                            .whereGreaterThanOrEqualTo("number", withPrefix)
-                            .whereLessThanOrEqualTo("number", withPrefix + "\uf8ff")
-                            .limit(20).get().await()
-                        list.addAll(snapGroup.documents.map { mapToCallLogItem(it) })
                     }
 
                 } catch (e: Exception) {
@@ -347,8 +381,8 @@ class SearchActivity : AppCompatActivity() {
                         FirestoreUi.handleFailure(this@SearchActivity, e, "SearchActivity")
                     }
                 }
-                
-                list.distinctBy { it.number.replace("[^0-9+]".toRegex(), "") }
+
+                list.distinctBy { normalizeResultNumber(it.number) ?: it.number }
             }
 
             withContext(Dispatchers.Main) {
@@ -359,7 +393,7 @@ class SearchActivity : AppCompatActivity() {
                 remoteResults.clear()
                 remoteResults.addAll(results)
                 remoteAdapter?.updateData(results)
-                
+
                 if (results.isEmpty()) {
                     llRemoteSearchAction.visibility = View.VISIBLE
                     tvRemoteHeader.visibility = View.VISIBLE
@@ -372,21 +406,40 @@ class SearchActivity : AppCompatActivity() {
         }
     }
 
-    private fun mapToCallLogItem(doc: DocumentSnapshot): CallLogItem {
-        val name = doc.getString("name") ?: doc.getString("fullName") ?: doc.getString("primaryName") ?: "Unknown"
-        val number = doc.getString("number") ?: doc.getString("mobileNumber") ?: if (doc.reference.path.contains("global_spam")) doc.id else ""
-        val isSpam = doc.getBoolean("isVerifiedSpam") ?: false
-        
+    private fun buildNumberSearchVariants(query: String): List<String> {
+        return PhoneNumberVariants.buildFirestoreDocumentIds(query).take(10)
+    }
+
+    private fun mapToCallLogItem(doc: DocumentSnapshot, lookupSource: String): CallLogItem? {
+        val number = normalizeResultNumber(
+            doc.getString("number"),
+            doc.getString("phoneNumber"),
+            doc.getString("mobile"),
+            doc.getString("mobileNumber"),
+            if (lookupSource == "spam") doc.id else null
+        ) ?: return null
+
+        val name = doc.getString("name")
+            ?: doc.getString("fullName")
+            ?: doc.getString("primaryName")
+            ?: doc.getString("names")
+            ?: number
+
         return CallLogItem(
             name = name,
             number = number,
-            type = if (isSpam) "Verified" else "Community",
-            time = 0,
+            type = "Unknown",
+            time = 0L,
             simId = 1,
             photoUri = null,
-            dbName = name,
-            isGlobalSpam = isSpam
+            lookupSource = lookupSource
         )
+    }
+
+    private fun normalizeResultNumber(vararg candidates: String?): String? {
+        val raw = candidates.firstNotNullOfOrNull { it?.trim()?.takeIf(String::isNotBlank) } ?: return null
+        return PhoneNumberVariants.toIndianMobilePlus(raw)
+            ?: PhoneNumberVariants.digitsOnly(raw).takeIf { it.isNotBlank() }?.let { "+$it" }
     }
 
     private fun clearResults() {
@@ -394,7 +447,7 @@ class SearchActivity : AppCompatActivity() {
         localAdapter?.updateData(emptyList())
         remoteResults.clear()
         remoteAdapter?.updateData(emptyList())
-        
+
         tvContactsHeader.visibility = View.GONE
         tvRemoteHeader.visibility = View.GONE
         btnShowMore.visibility = View.GONE

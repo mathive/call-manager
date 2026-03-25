@@ -22,7 +22,6 @@
             android:clipToPadding="false"
             android:paddingBottom="24dp">
 
-            <!-- Top Header Background - BLACK PATCH -->
             <View
                 android:id="@+id/profileHeader"
                 android:layout_width="match_parent"
@@ -30,34 +29,29 @@
                 android:background="@color/brand_black"
                 app:layout_constraintTop_toTopOf="parent" />
 
-            <!-- Custom Toolbar -->
             <androidx.appcompat.widget.Toolbar
                 android:id="@+id/toolbar"
                 android:layout_width="match_parent"
                 android:layout_height="?attr/actionBarSize"
                 app:layout_constraintTop_toTopOf="parent"
-                app:navigationIcon="@drawable/ic_back">
-            </androidx.appcompat.widget.Toolbar>
+                app:navigationIcon="@drawable/ic_back" />
 
-            <!-- Profile Image -->
             <com.google.android.material.imageview.ShapeableImageView
                 android:id="@+id/ivUserProfile"
                 android:layout_width="120dp"
                 android:layout_height="120dp"
                 android:background="@color/brand_black"
-                android:contentDescription="@string/cd_profile_icon"
                 android:padding="2dp"
                 android:src="@drawable/ic_person"
-                app:shapeAppearanceOverlay="@style/ShapeAppearanceOverlay.App.Circle"
-                app:strokeColor="@color/white"
-                app:strokeWidth="3dp"
                 app:layout_constraintBottom_toBottomOf="@id/profileHeader"
                 app:layout_constraintEnd_toEndOf="parent"
                 app:layout_constraintStart_toStartOf="parent"
                 app:layout_constraintTop_toTopOf="@id/profileHeader"
-                app:layout_constraintVertical_bias="0.4" />
+                app:layout_constraintVertical_bias="0.4"
+                app:shapeAppearanceOverlay="@style/ShapeAppearanceOverlay.App.Circle"
+                app:strokeColor="@color/white"
+                app:strokeWidth="3dp" />
 
-            <!-- User Name -->
             <TextView
                 android:id="@+id/tvUserName"
                 android:layout_width="wrap_content"
@@ -71,7 +65,6 @@
                 app:layout_constraintStart_toStartOf="parent"
                 app:layout_constraintTop_toBottomOf="@id/ivUserProfile" />
 
-            <!-- Details Section -->
             <androidx.cardview.widget.CardView
                 android:id="@+id/detailsCard"
                 android:layout_width="match_parent"
@@ -154,7 +147,6 @@
                 </LinearLayout>
             </androidx.cardview.widget.CardView>
 
-            <!-- Settings Section -->
             <TextView
                 android:id="@+id/tvSettingsHeader"
                 android:layout_width="wrap_content"
@@ -183,7 +175,6 @@
                     android:orientation="vertical"
                     android:padding="8dp">
 
-                    <!-- Block All Unknown -->
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
@@ -213,7 +204,6 @@
                         android:layout_marginHorizontal="8dp"
                         android:background="#EEEEEE" />
 
-                    <!-- Block WhatsApp Unknown -->
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
@@ -243,7 +233,6 @@
                         android:layout_marginHorizontal="8dp"
                         android:background="#EEEEEE" />
 
-                    <!-- Edge Glow Alert -->
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
@@ -273,7 +262,6 @@
         </androidx.constraintlayout.widget.ConstraintLayout>
     </androidx.core.widget.NestedScrollView>
 
-    <!-- Logout Button -->
     <com.google.android.material.button.MaterialButton
         android:id="@+id/btnLogout"
         android:layout_width="match_parent"

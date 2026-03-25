@@ -40,7 +40,6 @@
             android:orientation="vertical"
             android:paddingBottom="20dp">
 
-            <!-- Local Contacts Section -->
             <TextView
                 android:id="@+id/tvContactsHeader"
                 android:layout_width="wrap_content"
@@ -75,7 +74,6 @@
                 android:background="#333333"
                 android:visibility="gone" />
 
-            <!-- Remote DB Section -->
             <TextView
                 android:id="@+id/tvRemoteHeader"
                 android:layout_width="wrap_content"

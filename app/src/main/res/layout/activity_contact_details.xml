@@ -7,7 +7,6 @@
     android:layout_height="match_parent"
     android:background="@color/bg_main">
 
-    <!-- Top Header Background - BLACK PATCH -->
     <View
         android:id="@+id/detailHeader"
         android:layout_width="match_parent"
@@ -15,7 +14,6 @@
         android:background="@color/brand_black"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <!-- Custom Toolbar -->
     <androidx.appcompat.widget.Toolbar
         android:id="@+id/toolbar"
         android:layout_width="match_parent"
@@ -28,17 +26,16 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="center"
+            android:letterSpacing="0.1"
             android:text="@string/in_contacts"
             android:textColor="@color/white"
             android:textSize="12sp"
-            android:letterSpacing="0.1"
             android:textStyle="bold"
             android:visibility="gone"
             tools:visibility="visible" />
 
     </androidx.appcompat.widget.Toolbar>
 
-    <!-- Profile Image Centered in Header Patch -->
     <FrameLayout
         android:id="@+id/profileContainer"
         android:layout_width="wrap_content"
@@ -59,9 +56,20 @@
             app:strokeColor="@color/white"
             app:strokeWidth="3dp" />
 
+        <TextView
+            android:id="@+id/tvDetailInitials"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            android:textColor="@color/white"
+            android:textSize="30sp"
+            android:textStyle="bold"
+            android:visibility="gone"
+            tools:text="AB"
+            tools:visibility="visible" />
+
     </FrameLayout>
 
-    <!-- Contact Name at Red Patch Bottom -->
     <TextView
         android:id="@+id/tvDetailName"
         android:layout_width="wrap_content"
@@ -75,7 +83,6 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent" />
 
-    <!-- Sticky Action Buttons Row with Shadow -->
     <LinearLayout
         android:id="@+id/stickyActionsLayout"
         android:layout_width="match_parent"
@@ -104,7 +111,6 @@
             layout="@layout/item_detail_action" />
     </LinearLayout>
 
-    <!-- Scrollable Call History -->
     <androidx.core.widget.NestedScrollView
         android:layout_width="match_parent"
         android:layout_height="0dp"
@@ -113,11 +119,48 @@
         app:layout_constraintTop_toBottomOf="@id/stickyActionsLayout">
 
         <LinearLayout
-            android:id="@+id/llCallHistoryContainer"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:paddingBottom="32dp" />
+            android:paddingBottom="32dp">
+
+            <LinearLayout
+                android:id="@+id/spamInfoContainer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginHorizontal="16dp"
+                android:layout_marginTop="12dp"
+                android:background="@color/white"
+                android:elevation="2dp"
+                android:orientation="vertical"
+                android:padding="16dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/tvSpamInfoTitle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/spam_info_title"
+                    android:textColor="@color/brand_black"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <com.google.android.material.chip.ChipGroup
+                    android:id="@+id/chipSpamReasons"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    app:chipSpacingHorizontal="8dp"
+                    app:chipSpacingVertical="8dp"
+                    app:singleLine="false" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/llCallHistoryContainer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+        </LinearLayout>
 
     </androidx.core.widget.NestedScrollView>
 

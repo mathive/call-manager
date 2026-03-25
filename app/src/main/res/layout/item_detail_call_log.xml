@@ -3,8 +3,8 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:paddingVertical="12dp"
-    android:paddingHorizontal="16dp">
+    android:paddingHorizontal="16dp"
+    android:paddingVertical="12dp">
 
     <ImageView
         android:id="@+id/ivCallType"
@@ -12,10 +12,10 @@
         android:layout_height="18dp"
         android:contentDescription="@string/cd_call_type"
         android:src="@drawable/ic_call_incoming"
+        app:layout_constraintBottom_toBottomOf="@+id/tvCallTime"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="@+id/tvCallTime"
-        app:layout_constraintBottom_toBottomOf="@+id/tvCallTime"
-        app:tint="@color/text_primary" />
+        app:tint="@color/brand_black" />
 
     <TextView
         android:id="@+id/tvCallTime"
@@ -23,7 +23,7 @@
         android:layout_height="wrap_content"
         android:layout_marginStart="16dp"
         android:text="@string/detail_time_placeholder"
-        android:textColor="@color/text_primary"
+        android:textColor="@color/brand_black"
         android:textSize="18sp"
         app:layout_constraintStart_toEndOf="@id/ivCallType"
         app:layout_constraintTop_toTopOf="parent" />
@@ -35,9 +35,9 @@
         android:layout_marginTop="2dp"
         android:gravity="center_vertical"
         android:orientation="horizontal"
+        app:layout_constraintEnd_toStartOf="@+id/tvDuration"
         app:layout_constraintStart_toStartOf="@id/tvCallTime"
-        app:layout_constraintTop_toBottomOf="@id/tvCallTime"
-        app:layout_constraintEnd_toStartOf="@+id/tvDuration">
+        app:layout_constraintTop_toBottomOf="@id/tvCallTime">
 
         <TextView
             android:id="@+id/tvSimLabel"
@@ -82,7 +82,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="@string/detail_duration_placeholder"
-        android:textColor="@color/text_secondary"
+        android:textColor="@color/brand_black"
         android:textSize="13sp"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"

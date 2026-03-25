@@ -2,12 +2,13 @@
 <androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/rowContainer"
     android:layout_width="match_parent"
     android:layout_height="72dp"
-    android:background="?attr/selectableItemBackground"
+    android:background="@color/brand_white"
+    android:foreground="?attr/selectableItemBackground"
     android:paddingHorizontal="16dp">
 
-    <!-- Profile Container - ABSOLUTELY FIXED SIZE -->
     <FrameLayout
         android:id="@+id/profileContainer"
         android:layout_width="44dp"
@@ -16,7 +17,6 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent">
 
-        <!-- 1. The Circle / Photo View -->
         <com.google.android.material.imageview.ShapeableImageView
             android:id="@+id/ivProfileBg"
             android:layout_width="match_parent"
@@ -24,7 +24,6 @@
             android:scaleType="centerCrop"
             app:shapeAppearanceOverlay="@style/ShapeAppearanceOverlay.App.Circle" />
 
-        <!-- 2. The Initials View (Centered) -->
         <TextView
             android:id="@+id/tvInitials"
             android:layout_width="match_parent"
@@ -37,7 +36,6 @@
             tools:text="AB"
             tools:visibility="visible" />
 
-        <!-- 3. The Icon View (Centered, Fixed 20dp) -->
         <ImageView
             android:id="@+id/ivUnknownIcon"
             android:layout_width="20dp"
@@ -48,9 +46,18 @@
             android:visibility="gone"
             app:tint="@color/white"
             tools:visibility="visible" />
+
+        <ProgressBar
+            android:id="@+id/progressLookup"
+            style="?android:attr/progressBarStyleSmall"
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:layout_gravity="center"
+            android:indeterminate="true"
+            android:visibility="gone"
+            tools:visibility="visible" />
     </FrameLayout>
 
-    <!-- Name / Number -->
     <TextView
         android:id="@+id/tvContactName"
         android:layout_width="0dp"
@@ -67,7 +74,6 @@
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintVertical_chainStyle="packed" />
 
-    <!-- Sub-details Row -->
     <LinearLayout
         android:id="@+id/simLayout"
         android:layout_width="0dp"

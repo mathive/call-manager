@@ -1,14 +1,16 @@
 package com.callmanager.callmanager
 
-import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.text.format.DateUtils
+import android.content.Intent
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageView
+import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.toColorInt
 import androidx.recyclerview.widget.DiffUtil
@@ -17,28 +19,20 @@ import com.bumptech.glide.Glide
 import com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions
 import com.google.android.material.imageview.ShapeableImageView
 import java.text.SimpleDateFormat
-import java.util.*
-
-data class CallLogItem(
-    var name: String,
-    val number: String,
-    val type: String,
-    val time: Long,
-    val simId: Int = 1,
-    val photoUri: String? = null,
-    var isBlockedLocally: Boolean = false,
-    var dbName: String? = null,
-    var isGlobalSpam: Boolean = false,
-    var isWhitelisted: Boolean = false
-)
+import java.util.Date
+import java.util.Locale
 
 class CallLogAdapter(callLogs: List<CallLogItem>) :
     RecyclerView.Adapter<CallLogAdapter.ViewHolder>() {
 
     private val callLogs = callLogs.toMutableList()
     private val bgColors = arrayOf("#F44336", "#E91E63", "#9C27B0", "#673AB7", "#3F51B5", "#2196F3", "#009688", "#4CAF50", "#FF9800", "#FF5722")
+    private val lookupBlockedOrSpam = setOf("blocked", "spam")
+    private val lookupWhiteList = setOf("whitelist")
+    private val lookupBlueSources = setOf("verified", "user_contact")
 
     class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
+        val rowContainer: ConstraintLayout = view.findViewById(R.id.rowContainer)
         val tvName: TextView = view.findViewById(R.id.tvContactName)
         val tvNumber: TextView = view.findViewById(R.id.tvPhoneNumber)
         val tvTime: TextView = view.findViewById(R.id.tvCallTime)
@@ -47,6 +41,7 @@ class CallLogAdapter(callLogs: List<CallLogItem>) :
         val ivProfileBg: ShapeableImageView = view.findViewById(R.id.ivProfileBg)
         val tvInitials: TextView = view.findViewById(R.id.tvInitials)
         val ivUnknownIcon: ImageView = view.findViewById(R.id.ivUnknownIcon)
+        val progressLookup: ProgressBar = view.findViewById(R.id.progressLookup)
         val ivInfo: ImageView = view.findViewById(R.id.ivInfo)
     }
 
@@ -58,127 +53,99 @@ class CallLogAdapter(callLogs: List<CallLogItem>) :
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
         val item = callLogs[position]
-        
-        // Prioritize name from database if available
-        val displayName = when {
-            !item.dbName.isNullOrEmpty() -> item.dbName
-            !item.name.isNullOrEmpty() && item.name != item.number -> item.name
-            else -> item.number
+        val baseDisplayName = item.name.ifBlank { item.number }
+        val displayName = if (item.callCount > 1) {
+            "$baseDisplayName(${item.callCount})"
+        } else {
+            baseDisplayName
         }
-        
-        val isStillUnknown = displayName == item.number
-        
+        val isUnknown = baseDisplayName == item.number
+
         holder.tvName.text = displayName
         holder.tvNumber.text = item.number
-        
-        // Show number only if the display name is different from the number
-        holder.tvNumber.visibility = if (displayName == item.number) View.GONE else View.VISIBLE
-        
-        when {
-            item.isBlockedLocally -> {
-                holder.itemView.setBackgroundColor(ContextCompat.getColor(holder.itemView.context, R.color.brand_red))
-                setWhiteTextUI(holder)
-            }
-            else -> {
-                holder.itemView.setBackgroundColor(Color.TRANSPARENT)
-                holder.tvName.setTextColor(Color.BLACK)
-                val secondaryColor = ContextCompat.getColor(holder.itemView.context, R.color.text_secondary)
-                holder.tvNumber.setTextColor(secondaryColor)
-                holder.tvTime.setTextColor(secondaryColor)
-                holder.tvSimLabel.setTextColor(secondaryColor)
-                holder.ivInfo.imageTintList = ColorStateList.valueOf(secondaryColor)
-            }
-        }
+        holder.tvNumber.visibility = if (isUnknown) View.GONE else View.VISIBLE
 
-        // Hide call-specific details if time is 0 (Treat as Contact)
-        if (item.time == 0L) {
-            holder.tvTime.visibility = View.GONE
-            holder.tvSimLabel.visibility = View.GONE
-            holder.ivCallType.visibility = View.GONE
-        } else {
-            holder.tvTime.visibility = View.VISIBLE
-            holder.tvSimLabel.visibility = View.VISIBLE
-            holder.ivCallType.visibility = View.VISIBLE
-            holder.tvTime.text = formatCallTime(item.time)
-            holder.tvSimLabel.text = item.simId.toString()
-            bindCallDirection(holder, item.type)
-        }
+        val secondaryColor = ContextCompat.getColor(holder.itemView.context, R.color.text_secondary)
+        holder.rowContainer.setBackgroundColor(ContextCompat.getColor(holder.itemView.context, R.color.brand_white))
+        holder.tvName.setTextColor(Color.BLACK)
+        holder.tvNumber.setTextColor(secondaryColor)
+        holder.tvTime.setTextColor(secondaryColor)
+        holder.tvSimLabel.setTextColor(secondaryColor)
+        holder.ivInfo.imageTintList = ColorStateList.valueOf(secondaryColor)
 
-        bindProfile(holder, item, isStillUnknown)
+        holder.tvTime.text = formatCallTime(item.time)
+        holder.tvSimLabel.text = item.simId.toString()
+        bindCallDirection(holder, item.type)
+        bindProfile(holder, item, isUnknown)
 
-        // Open Contact Details on Click
-        val clickListener = View.OnClickListener {
+        val openDetails = View.OnClickListener {
             val intent = Intent(holder.itemView.context, ContactDetailsActivity::class.java).apply {
-                putExtra("name", displayName)
+                putExtra("name", baseDisplayName)
                 putExtra("number", item.number)
                 putExtra("photoUri", item.photoUri)
+                putExtra("lookupSource", item.lookupSource)
             }
             holder.itemView.context.startActivity(intent)
         }
-
-        holder.itemView.setOnClickListener(clickListener)
-        holder.ivInfo.setOnClickListener(clickListener)
-    }
-
-    private fun setWhiteTextUI(holder: ViewHolder) {
-        holder.tvName.setTextColor(Color.WHITE)
-        val lightGray = "#EEEEEE".toColorInt()
-        holder.tvNumber.setTextColor(lightGray)
-        holder.tvTime.setTextColor(lightGray)
-        holder.tvSimLabel.setTextColor(Color.WHITE)
-        holder.ivInfo.imageTintList = ColorStateList.valueOf(Color.WHITE)
+        holder.itemView.setOnClickListener(openDetails)
+        holder.ivInfo.setOnClickListener(openDetails)
     }
 
     private fun bindProfile(holder: ViewHolder, item: CallLogItem, isUnknown: Boolean) {
+        val context = holder.itemView.context
         Glide.with(holder.itemView.context).clear(holder.ivProfileBg)
         holder.ivProfileBg.setImageDrawable(null)
         holder.ivProfileBg.setBackgroundColor(Color.TRANSPARENT)
         holder.ivProfileBg.strokeWidth = 0f
         holder.tvInitials.visibility = View.GONE
         holder.ivUnknownIcon.visibility = View.GONE
+        holder.progressLookup.visibility = View.GONE
 
-        if (item.isWhitelisted) {
-            holder.ivProfileBg.visibility = View.VISIBLE
-            holder.ivProfileBg.setBackgroundColor(ContextCompat.getColor(holder.itemView.context, R.color.verified_green))
-            holder.ivProfileBg.strokeColor = ColorStateList.valueOf(Color.WHITE)
-            holder.ivProfileBg.strokeWidth = 4f
-            holder.ivUnknownIcon.setImageResource(R.drawable.ic_verified)
-            holder.ivUnknownIcon.imageTintList = ColorStateList.valueOf(Color.WHITE)
-            holder.ivUnknownIcon.visibility = View.VISIBLE
-        } else if (item.isBlockedLocally || item.isGlobalSpam) {
-            holder.ivProfileBg.visibility = View.VISIBLE
-            holder.ivProfileBg.setBackgroundColor("#E74C3C".toColorInt()) // Red circle
-            
-            // Add white border only if the row background is also red (Personal Block)
-            if (item.isBlockedLocally) {
-                holder.ivProfileBg.strokeColor = ColorStateList.valueOf(Color.WHITE)
-                holder.ivProfileBg.strokeWidth = 4f
-            }
-
-            holder.ivUnknownIcon.setImageResource(R.drawable.ic_block)
-            holder.ivUnknownIcon.imageTintList = ColorStateList.valueOf(Color.WHITE)
-            holder.ivUnknownIcon.visibility = View.VISIBLE
-            holder.tvInitials.visibility = View.GONE
-        } else if (!item.photoUri.isNullOrEmpty()) {
+        if (!item.photoUri.isNullOrEmpty()) {
             holder.ivProfileBg.visibility = View.VISIBLE
             Glide.with(holder.itemView.context)
                 .load(item.photoUri)
                 .centerCrop()
                 .transition(DrawableTransitionOptions.withCrossFade())
                 .into(holder.ivProfileBg)
+        } else if (item.lookupSource in lookupBlockedOrSpam) {
+            holder.rowContainer.setBackgroundColor(ContextCompat.getColor(context, R.color.blocked_card_bg))
+            holder.ivProfileBg.visibility = View.VISIBLE
+            holder.ivProfileBg.setBackgroundColor(ContextCompat.getColor(context, R.color.brand_red))
+            holder.ivUnknownIcon.setImageResource(R.drawable.ic_block)
+            holder.ivUnknownIcon.imageTintList = ColorStateList.valueOf(ContextCompat.getColor(context, R.color.white))
+            holder.ivUnknownIcon.visibility = View.VISIBLE
+        } else if (item.lookupSource in lookupWhiteList) {
+            holder.rowContainer.setBackgroundColor(ContextCompat.getColor(context, R.color.whitelist_card_bg))
+            holder.ivProfileBg.visibility = View.VISIBLE
+            holder.ivProfileBg.setBackgroundColor(ContextCompat.getColor(context, R.color.verified_green))
+            holder.tvInitials.visibility = View.VISIBLE
+            holder.tvInitials.setTextColor(ContextCompat.getColor(context, R.color.white))
+            holder.tvInitials.text = getInitials(item.name)
+        } else if (item.lookupSource in lookupBlueSources) {
+            holder.rowContainer.setBackgroundColor(ContextCompat.getColor(context, R.color.verified_card_bg))
+            holder.ivProfileBg.visibility = View.VISIBLE
+            holder.ivProfileBg.setBackgroundColor(ContextCompat.getColor(context, R.color.outgoing_blue))
+            holder.tvInitials.visibility = View.VISIBLE
+            holder.tvInitials.setTextColor(ContextCompat.getColor(context, R.color.white))
+            holder.tvInitials.text = getInitials(item.name)
         } else if (!isUnknown) {
-            val nameToUse = if (!item.dbName.isNullOrEmpty()) item.dbName!! else item.name
-            val colorIndex = Math.abs(nameToUse.hashCode() % bgColors.size)
+            val colorIndex = kotlin.math.abs(item.name.hashCode() % bgColors.size)
             holder.ivProfileBg.visibility = View.VISIBLE
             holder.ivProfileBg.setBackgroundColor(bgColors[colorIndex].toColorInt())
             holder.tvInitials.visibility = View.VISIBLE
-            holder.tvInitials.text = getInitials(nameToUse)
+            holder.tvInitials.setTextColor(Color.WHITE)
+            holder.tvInitials.text = getInitials(item.name)
         } else {
             holder.ivProfileBg.visibility = View.VISIBLE
             holder.ivProfileBg.setBackgroundColor(ContextCompat.getColor(holder.itemView.context, R.color.brand_black))
-            holder.ivUnknownIcon.setImageResource(R.drawable.ic_person)
-            holder.ivUnknownIcon.imageTintList = ColorStateList.valueOf(Color.WHITE)
-            holder.ivUnknownIcon.visibility = View.VISIBLE
+            if (item.isLookupInProgress) {
+                holder.progressLookup.visibility = View.VISIBLE
+            } else {
+                holder.ivUnknownIcon.setImageResource(R.drawable.ic_person)
+                holder.ivUnknownIcon.imageTintList = ColorStateList.valueOf(Color.WHITE)
+                holder.ivUnknownIcon.visibility = View.VISIBLE
+            }
         }
     }
 
@@ -212,16 +179,17 @@ class CallLogAdapter(callLogs: List<CallLogItem>) :
         val parts = name.trim().split("\\s+".toRegex())
         return if (parts.size >= 2) {
             (parts[0][0].toString() + parts[1][0].toString()).uppercase()
-        } else if (parts.isNotEmpty()) {
+        } else if (parts.isNotEmpty() && parts[0].isNotBlank()) {
             parts[0][0].toString().uppercase()
-        } else "?"
+        } else {
+            "?"
+        }
     }
 
     fun updateData(newItems: List<CallLogItem>) {
         val oldItems = callLogs.toList()
         val diffResult = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
             override fun getOldListSize() = oldItems.size
-
             override fun getNewListSize() = newItems.size
 
             override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean {
@@ -229,7 +197,8 @@ class CallLogAdapter(callLogs: List<CallLogItem>) :
                 val newItem = newItems[newItemPosition]
                 return oldItem.number == newItem.number &&
                     oldItem.time == newItem.time &&
-                    oldItem.type == newItem.type
+                    oldItem.type == newItem.type &&
+                    oldItem.callCount == newItem.callCount
             }
 
             override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean {

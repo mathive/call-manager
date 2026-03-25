@@ -1,50 +1,101 @@
 package com.callmanager.callmanager
 
 import android.Manifest
-import android.content.Context
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
+import android.database.ContentObserver
 import android.database.Cursor
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.CallLog
 import android.provider.ContactsContract
 import android.text.format.DateUtils
 import android.view.LayoutInflater
 import android.view.View
-import android.widget.*
+import android.widget.CheckBox
+import android.widget.EditText
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.widget.Toolbar
-import androidx.core.content.edit
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.lifecycle.lifecycleScope
 import com.bumptech.glide.Glide
-import com.google.android.material.imageview.ShapeableImageView
+import com.google.android.material.chip.Chip
+import com.google.android.material.chip.ChipGroup
 import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.SetOptions
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
+import com.google.android.material.imageview.ShapeableImageView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
-import java.util.*
+import java.util.Date
+import java.util.Locale
 
 class ContactDetailsActivity : AppCompatActivity() {
 
     private val whatsappPkg = "com.whatsapp"
     private val whatsappBusinessPkg = "com.whatsapp.w4b"
-    private val db = FirebaseFirestore.getInstance()
-    private val auth = FirebaseAuth.getInstance()
-    private var isBlockedLocally = false
-    private var isWhitelisted = false
+    private val observerHandler = Handler(Looper.getMainLooper())
+    private val pollHandler = Handler(Looper.getMainLooper())
+    private val gson = Gson()
+    private var contactNumber: String = ""
+    private var currentLookupSource: String? = null
+    private var currentDisplayName: String = ""
+    private var currentSpamReasonCounts: Map<String, Long> = emptyMap()
+    private var currentIsBlockedByUser: Boolean = false
+    private var currentIsWhitelistedByUser: Boolean = false
+
+    private val callLogObserver = object : ContentObserver(observerHandler) {
+        override fun onChange(selfChange: Boolean) {
+            super.onChange(selfChange)
+            observerHandler.removeCallbacks(callHistoryRefreshRunnable)
+            observerHandler.removeCallbacks(contactRefreshRunnable)
+            observerHandler.postDelayed(callHistoryRefreshRunnable, 400L)
+        }
+    }
+
+    private val contactsObserver = object : ContentObserver(observerHandler) {
+        override fun onChange(selfChange: Boolean) {
+            super.onChange(selfChange)
+            observerHandler.removeCallbacks(contactRefreshRunnable)
+            observerHandler.postDelayed(contactRefreshRunnable, 400L)
+        }
+    }
+
+    private val callHistoryRefreshRunnable = Runnable {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED) {
+            loadActualCallHistory(contactNumber)
+        }
+    }
+
+    private val contactRefreshRunnable = Runnable {
+        refreshContactHeader()
+    }
+
+    private val foregroundPollRunnable = object : Runnable {
+        override fun run() {
+            refreshContactHeader()
+            if (ContextCompat.checkSelfPermission(this@ContactDetailsActivity, Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED) {
+                loadActualCallHistory(contactNumber)
+            }
+            pollHandler.postDelayed(this, 2000L)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -55,36 +106,21 @@ class ContactDetailsActivity : AppCompatActivity() {
         supportActionBar?.setDisplayShowTitleEnabled(false)
         toolbar.setNavigationOnClickListener { finish() }
 
-        val name = intent.getStringExtra("name") ?: "Unknown"
+        val name = intent.getStringExtra("name") ?: getString(R.string.contact_name_placeholder)
         val number = intent.getStringExtra("number") ?: ""
+        contactNumber = number
+        currentLookupSource = intent.getStringExtra("lookupSource")
+        currentDisplayName = name
         val photoUri = intent.getStringExtra("photoUri")
 
-        val tvName: TextView = findViewById(R.id.tvDetailName)
-        val ivProfile: ShapeableImageView = findViewById(R.id.ivDetailProfile)
-        val tvInContactsLabel: TextView = findViewById(R.id.tvInContactsLabel)
+        findViewById<TextView>(R.id.tvDetailName).text = name
+        bindProfile(photoUri, currentLookupSource, name)
+        bindActionButtons(number)
+        updateSpamInfoUi()
 
-        tvName.text = name
-
-        checkGlobalAndLocalStatus(number, tvName, ivProfile)
-        setupActionButtons(number, name)
-
-        if (!photoUri.isNullOrEmpty()) {
-            Glide.with(this)
-                .load(photoUri)
-                .circleCrop()
-                .placeholder(R.drawable.ic_person)
-                .into(ivProfile)
-        } else {
-            // Default "Unknown" user UI: Circle with white person icon
-            ivProfile.setImageResource(R.drawable.ic_person)
-            ivProfile.imageTintList = ColorStateList.valueOf(Color.WHITE)
-            ivProfile.setBackgroundColor(getColor(R.color.brand_black))
-            ivProfile.setPadding(30, 30, 30, 30)
-        }
-
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
-            checkContactStatus(number, tvInContactsLabel)
-        }
+        refreshPersonalListState()
+        refreshContactHeader()
+        maybeResolveUnknownDetails()
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED) {
             loadActualCallHistory(number)
@@ -94,133 +130,119 @@ class ContactDetailsActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         FirestoreUi.showPendingMessageIfAny(this)
-    }
-
-    private fun checkGlobalAndLocalStatus(number: String, tvName: TextView, ivProfile: ShapeableImageView) {
-        val currentUser = auth.currentUser ?: return
-        val cleanNumber = normalizeNumber(number)
-        
-        lifecycleScope.launch {
-            try {
-                // Check Personal Block
-                val localDoc = db.collection("users").document(currentUser.uid)
-                    .collection("blocked_numbers").document(cleanNumber).get().await()
-                isBlockedLocally = localDoc.exists()
-                
-                // Check Whitelist
-                val whiteDoc = db.collection("users").document(currentUser.uid)
-                    .collection("white_list_numbers").document(cleanNumber).get().await()
-                isWhitelisted = whiteDoc.exists()
-                
-                updateBlockButtonUI()
-                updateVerifiedButtonUI()
-
-                // Priority: Whitelist (Green) > Blocked (Red) > Default (Black)
-                if (isWhitelisted) {
-                    applyVerifiedUI(ivProfile)
-                } else if (isBlockedLocally) {
-                    applyBlockedUI(ivProfile)
-                } else {
-                    // Check Global Spam for Name and UI updates
-                    val globalDoc = db.collection("global_spam").document(cleanNumber).get().await()
-                    if (globalDoc.exists()) {
-                        val globalName = globalDoc.getString("primaryName")
-                        if (!globalName.isNullOrEmpty()) {
-                            tvName.text = globalName
-                        }
-                        
-                        val isVerified = globalDoc.getBoolean("isVerifiedSpam") ?: false
-                        if (isVerified) {
-                            applyBlockedUI(ivProfile)
-                        }
-                    }
-                }
-
-            } catch (e: Exception) { }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED) {
+            contentResolver.registerContentObserver(CallLog.Calls.CONTENT_URI, true, callLogObserver)
+            loadActualCallHistory(contactNumber)
         }
-    }
-
-    private fun normalizeNumber(number: String): String {
-        val digitsOnly = number.replace("[^0-9]".toRegex(), "")
-        return when {
-            digitsOnly.length == 10 -> "91$digitsOnly"
-            digitsOnly.length == 11 && digitsOnly.startsWith("0") -> "91${digitsOnly.substring(1)}"
-            digitsOnly.length == 12 && digitsOnly.startsWith("91") -> digitsOnly
-            else -> digitsOnly
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
+            contentResolver.registerContentObserver(ContactsContract.Contacts.CONTENT_URI, true, contactsObserver)
+            syncContactsToDb()
+            refreshContactHeader()
         }
+        refreshPersonalListState()
+        pollHandler.removeCallbacksAndMessages(null)
+        pollHandler.post(foregroundPollRunnable)
     }
 
-    private fun applyBlockedUI(ivProfile: ShapeableImageView) {
-        val headerView: View = findViewById(R.id.detailHeader)
-        headerView.setBackgroundColor(getColor(R.color.brand_red))
-        ivProfile.setImageResource(R.drawable.ic_block)
-        ivProfile.setBackgroundColor(getColor(R.color.brand_red))
-        ivProfile.imageTintList = ColorStateList.valueOf(Color.WHITE)
-        ivProfile.setPadding(30, 30, 30, 30)
+    override fun onPause() {
+        super.onPause()
+        contentResolver.unregisterContentObserver(callLogObserver)
+        runCatching { contentResolver.unregisterContentObserver(contactsObserver) }
+        observerHandler.removeCallbacksAndMessages(null)
+        pollHandler.removeCallbacksAndMessages(null)
     }
 
-    private fun applyVerifiedUI(ivProfile: ShapeableImageView) {
-        val headerView: View = findViewById(R.id.detailHeader)
-        headerView.setBackgroundColor(getColor(R.color.verified_green))
-        ivProfile.setImageResource(R.drawable.ic_person)
-        ivProfile.setBackgroundColor(getColor(R.color.verified_green))
-        ivProfile.imageTintList = ColorStateList.valueOf(Color.WHITE)
-        ivProfile.setPadding(30, 30, 30, 30)
-    }
-
-    private fun updateBlockButtonUI() {
-        val blockView: View = findViewById(R.id.actionBlock)
-        val ivIcon = blockView.findViewById<ImageView>(R.id.ivActionIcon)
-        val tvLabel = blockView.findViewById<TextView>(R.id.tvActionLabel)
-
-        if (isBlockedLocally) {
-            ivIcon.setImageResource(R.drawable.ic_block)
-            ivIcon.setColorFilter(getColor(R.color.brand_red))
-            tvLabel.text = getString(R.string.unblock)
-        } else {
-            ivIcon.setImageResource(R.drawable.ic_block)
-            ivIcon.setColorFilter(getColor(R.color.brand_red))
-            tvLabel.text = getString(R.string.block)
+    private fun refreshContactHeader() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+            return
         }
-    }
 
-    private fun updateVerifiedButtonUI() {
-        val verifiedView: View = findViewById(R.id.actionVerified)
-        val ivIcon = verifiedView.findViewById<ImageView>(R.id.ivActionIcon)
-        val tvLabel = verifiedView.findViewById<TextView>(R.id.tvActionLabel)
+        val label = findViewById<TextView>(R.id.tvInContactsLabel)
+        val nameView = findViewById<TextView>(R.id.tvDetailName)
 
-        if (isWhitelisted) {
-            ivIcon.setColorFilter(getColor(R.color.verified_green))
-            tvLabel.text = getString(R.string.verified)
-        } else {
-            ivIcon.setColorFilter(Color.GRAY)
-            tvLabel.text = getString(R.string.verify)
-        }
-    }
-
-    private fun checkContactStatus(phoneNumber: String, label: TextView) {
         lifecycleScope.launch(Dispatchers.IO) {
-            val uri = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(phoneNumber))
+            val uri = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(contactNumber))
             val projection = arrayOf(
-                ContactsContract.PhoneLookup.DISPLAY_NAME
+                ContactsContract.PhoneLookup.DISPLAY_NAME,
+                ContactsContract.PhoneLookup.PHOTO_URI
             )
-            var exists = false
+
+            var displayName: String? = null
+            var photoUri: String? = null
             try {
                 contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
                     if (cursor.moveToFirst()) {
-                        exists = true
+                        displayName = cursor.getString(0)
+                        photoUri = cursor.getString(1)
                     }
                 }
-            } catch (e: Exception) { }
+            } catch (_: Exception) {
+            }
 
             withContext(Dispatchers.Main) {
-                label.visibility = if (exists) View.VISIBLE else View.GONE
+                label.visibility = if (displayName != null) View.VISIBLE else View.GONE
+                currentDisplayName = displayName ?: currentDisplayName.ifBlank { contactNumber }
+                nameView.text = currentDisplayName
+                bindProfile(photoUri ?: intent.getStringExtra("photoUri"), currentLookupSource, currentDisplayName)
+                bindActionButtons(contactNumber)
             }
         }
     }
 
-    private fun setupActionButtons(number: String, name: String) {
-        // WhatsApp Action
+    private fun bindProfile(photoUri: String?, lookupSource: String?, displayName: String) {
+        val detailHeader: View = findViewById(R.id.detailHeader)
+        val ivProfile: ShapeableImageView = findViewById(R.id.ivDetailProfile)
+        val tvInitials: TextView = findViewById(R.id.tvDetailInitials)
+        tvInitials.visibility = View.GONE
+        ivProfile.setPadding(2, 2, 2, 2)
+        ivProfile.strokeColor = ColorStateList.valueOf(getColor(R.color.white))
+        ivProfile.strokeWidth = 3f
+        detailHeader.setBackgroundColor(getColor(headerBackgroundColorRes(lookupSource)))
+
+        if (!photoUri.isNullOrEmpty()) {
+            Glide.with(this)
+                .load(photoUri)
+                .circleCrop()
+                .placeholder(R.drawable.ic_person)
+                .into(ivProfile)
+            ivProfile.imageTintList = null
+        } else {
+            when (lookupSource) {
+                LookupSource.BLOCKED, LookupSource.SPAM -> {
+                    ivProfile.setImageResource(R.drawable.ic_block)
+                    ivProfile.imageTintList = ColorStateList.valueOf(getColor(R.color.white))
+                    ivProfile.setBackgroundColor(getColor(R.color.brand_red))
+                    ivProfile.setPadding(26, 26, 26, 26)
+                }
+                LookupSource.WHITELIST -> {
+                    ivProfile.setImageResource(R.drawable.ic_person)
+                    ivProfile.imageTintList = ColorStateList.valueOf(getColor(R.color.white))
+                    ivProfile.setBackgroundColor(getColor(R.color.verified_green))
+                    ivProfile.setPadding(30, 30, 30, 30)
+                }
+                LookupSource.VERIFIED -> {
+                    ivProfile.setImageResource(R.drawable.ic_person)
+                    ivProfile.imageTintList = ColorStateList.valueOf(getColor(R.color.white))
+                    ivProfile.setBackgroundColor(getColor(R.color.outgoing_blue))
+                    ivProfile.setPadding(30, 30, 30, 30)
+                }
+                LookupSource.USER_CONTACT -> {
+                    ivProfile.setImageResource(R.drawable.ic_person)
+                    ivProfile.imageTintList = ColorStateList.valueOf(getColor(R.color.white))
+                    ivProfile.setBackgroundColor(getColor(R.color.brand_black))
+                    ivProfile.setPadding(30, 30, 30, 30)
+                }
+                else -> {
+                    ivProfile.setImageResource(R.drawable.ic_person)
+                    ivProfile.imageTintList = ColorStateList.valueOf(Color.WHITE)
+                    ivProfile.setBackgroundColor(getColor(R.color.brand_black))
+                    ivProfile.setPadding(30, 30, 30, 30)
+                }
+            }
+        }
+    }
+
+    private fun bindActionButtons(number: String) {
         val whatsappView: View = findViewById(R.id.actionWhatsapp)
         whatsappView.findViewById<ImageView>(R.id.ivActionIcon).apply {
             setImageResource(R.drawable.ic_whatsapp)
@@ -229,378 +251,623 @@ class ContactDetailsActivity : AppCompatActivity() {
         whatsappView.findViewById<TextView>(R.id.tvActionLabel).text = getString(R.string.whatsapp)
         whatsappView.setOnClickListener { handleWhatsappClick(number) }
 
-        // Block Action
-        val blockView: View = findViewById(R.id.actionBlock)
-        blockView.setOnClickListener {
-            if (isBlockedLocally) {
-                handleUnblock(number)
-            } else {
-                showBlockReasonDialog(number, name)
-            }
+        val isBlocked = currentIsBlockedByUser
+        val isVerified = currentIsWhitelistedByUser ||
+            currentLookupSource == LookupSource.VERIFIED ||
+            currentLookupSource == LookupSource.USER_CONTACT
+
+        bindAction(
+            R.id.actionBlock,
+            R.drawable.ic_block,
+            if (isBlocked) R.string.unblock else R.string.block,
+            if (isBlocked) R.color.brand_black else R.color.brand_red,
+            if (isBlocked) R.color.blocked_card_bg else R.color.brand_white
+        ) {
+            toggleBlock()
         }
-
-        // Report Action
-        val reportView: View = findViewById(R.id.actionReport)
-        reportView.findViewById<ImageView>(R.id.ivActionIcon).apply {
-            setImageResource(R.drawable.ic_shield)
-            setColorFilter(getColor(R.color.brand_warning))
-        }
-        reportView.findViewById<TextView>(R.id.tvActionLabel).text = getString(R.string.report)
-        reportView.setOnClickListener { showReportConfirmDialog(number, name) }
-
-        // Verified Action
-        val verifiedView: View = findViewById(R.id.actionVerified)
-        verifiedView.findViewById<ImageView>(R.id.ivActionIcon).setImageResource(R.drawable.ic_verified)
-        verifiedView.setOnClickListener { 
-            toggleWhitelist(number, name)
-        }
-    }
-
-    private fun toggleWhitelist(number: String, name: String) {
-        val currentUser = auth.currentUser ?: return
-        val cleanNumber = normalizeNumber(number)
-        val whitelistRef = db.collection("users").document(currentUser.uid).collection("white_list_numbers").document(cleanNumber)
-
-        lifecycleScope.launch {
-            try {
-                val ivProfile: ShapeableImageView = findViewById(R.id.ivDetailProfile)
-                if (isWhitelisted) {
-                    whitelistRef.delete().await()
-                    isWhitelisted = false
-                    updateLocalNameCache(cleanNumber, null)
-                    revertToDefaultUI(ivProfile)
-                    Toast.makeText(this@ContactDetailsActivity, R.string.removed_from_white_list_short, Toast.LENGTH_SHORT).show()
-                } else {
-                    val originalName = name.replace(" - online", "").trim()
-                    
-                    // Store WITHOUT suffix in DB
-                    val data = mapOf(
-                        "number" to cleanNumber,
-                        "name" to originalName,
-                        "timestamp" to FieldValue.serverTimestamp()
-                    )
-                    whitelistRef.set(data).await()
-                    isWhitelisted = true
-                    
-                    // Show WITH suffix in UI
-                    val uiName = if (originalName == "Unknown" || originalName == number || originalName.isEmpty()) {
-                        getString(R.string.verified_online)
-                    } else {
-                        getString(R.string.name_online, originalName)
-                    }
-                    
-                    updateLocalNameCache(cleanNumber, uiName)
-                    withContext(Dispatchers.Main) {
-                        findViewById<TextView>(R.id.tvDetailName).text = uiName
-                        applyVerifiedUI(ivProfile)
-                    }
-
-                    if (isBlockedLocally) {
-                        handleUnblock(number)
-                    }
-                    
-                    Toast.makeText(this@ContactDetailsActivity, R.string.added_to_white_list_short, Toast.LENGTH_SHORT).show()
-                }
-                updateVerifiedButtonUI()
-                updateLocalWhitelistCache(cleanNumber, isWhitelisted)
-                
-            } catch (e: Exception) {
-                FirestoreUi.handleFailure(this@ContactDetailsActivity, e, "ContactDetailsActivity")
-            }
-        }
-    }
-
-    private fun updateLocalNameCache(number: String, finalName: String?) {
-        val prefs = getSharedPreferences("DbNameCache", Context.MODE_PRIVATE)
-        val json = prefs.getString("names", null)
-        val cachedMap: MutableMap<String, String> = if (json != null) {
-            val type = object : TypeToken<MutableMap<String, String>>() {}.type
-            Gson().fromJson(json, type)
+        bindDisabledAction(R.id.actionReport, R.drawable.ic_shield, R.string.report, R.color.brand_warning)
+        val verifyView = findViewById<View>(R.id.actionVerified)
+        if (currentLookupSource == LookupSource.USER_CONTACT) {
+            verifyView.visibility = View.GONE
         } else {
-            mutableMapOf()
+            verifyView.visibility = View.VISIBLE
+            bindAction(
+                R.id.actionVerified,
+                R.drawable.ic_verified,
+                if (isVerified) R.string.unverify else R.string.verify,
+                if (isVerified) R.color.outgoing_blue else R.color.text_secondary,
+                R.color.brand_white
+            ) {
+                toggleWhiteList()
+            }
         }
-
-        if (finalName != null) {
-            cachedMap[number] = finalName
-        } else {
-            cachedMap.remove(number)
-        }
-
-        prefs.edit { putString("names", Gson().toJson(cachedMap)) }
     }
 
-    private fun updateLocalWhitelistCache(number: String, isAdding: Boolean) {
-        val prefs = getSharedPreferences("WhitelistCache", Context.MODE_PRIVATE)
-        val cachedSet = prefs.getStringSet("white_set", emptySet())?.toMutableSet() ?: mutableSetOf()
-        
-        if (isAdding) {
-            cachedSet.add(number)
-        } else {
-            cachedSet.remove(number)
-        }
-        
-        prefs.edit { putStringSet("white_set", cachedSet) }
-    }
-
-    private fun handleUnblock(number: String) {
-        val currentUser = auth.currentUser ?: return
-        val cleanNumber = normalizeNumber(number)
-
-        lifecycleScope.launch {
-            try {
-                db.collection("users").document(currentUser.uid)
-                    .collection("blocked_numbers").document(cleanNumber).delete().await()
-                
-                isBlockedLocally = false
-                updateLocalBlockCache(cleanNumber, false)
-                updateBlockButtonUI()
-                
-                val tvName: TextView = findViewById(R.id.tvDetailName)
-                val ivProfile: ShapeableImageView = findViewById(R.id.ivDetailProfile)
-                
-                // If it's whitelisted, keep verified UI, otherwise revert
-                if (isWhitelisted) {
-                    applyVerifiedUI(ivProfile)
-                } else {
-                    revertToDefaultUI(ivProfile)
-                    checkGlobalAndLocalStatus(number, tvName, ivProfile)
+    private fun refreshPersonalListState() {
+        val userId = FirebaseAuth.getInstance().currentUser?.uid ?: return
+        val normalizedNumber = normalizeLookupNumber(contactNumber) ?: contactNumber
+        val documentId = normalizedNumber.removePrefix("+")
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching {
+                val firestore = FirebaseFirestore.getInstance()
+                val userRef = firestore.collection("users").document(userId)
+                val blockedExists = userRef.collection("blocked_numbers").document(documentId).get().await().exists()
+                val whiteListedExists = userRef.collection("white_list_numbers").document(documentId).get().await().exists()
+                withContext(Dispatchers.Main) {
+                    currentIsBlockedByUser = blockedExists
+                    currentIsWhitelistedByUser = whiteListedExists
+                    bindActionButtons(contactNumber)
                 }
-                
-                Toast.makeText(this@ContactDetailsActivity, R.string.unblocked, Toast.LENGTH_SHORT).show()
-            } catch (e: Exception) {
-                FirestoreUi.handleFailure(this@ContactDetailsActivity, e, "ContactDetailsActivity")
             }
         }
     }
 
-    private fun revertToDefaultUI(ivProfile: ShapeableImageView) {
-        val headerView: View = findViewById(R.id.detailHeader)
-        headerView.setBackgroundColor(getColor(R.color.brand_black))
-        ivProfile.setImageResource(R.drawable.ic_person)
-        ivProfile.setBackgroundColor(getColor(R.color.brand_black))
-        ivProfile.imageTintList = ColorStateList.valueOf(Color.WHITE)
-        ivProfile.setPadding(30, 30, 30, 30)
-    }
-
-    private fun showBlockReasonDialog(number: String, name: String) {
-        val dialogView = LayoutInflater.from(this).inflate(R.layout.dialog_block_reason, null)
-        val etSuggestedName = dialogView.findViewById<EditText>(R.id.etSuggestedName)
-        val cbForMeOnly = dialogView.findViewById<CheckBox>(R.id.cbForMeOnly)
-        
-        val checkBoxes = listOf(
-            dialogView.findViewById<CheckBox>(R.id.cbSpam) to "Spam",
-            dialogView.findViewById<CheckBox>(R.id.cbHarassment) to "Harassment",
-            dialogView.findViewById<CheckBox>(R.id.cbFraud) to "Fraud",
-            dialogView.findViewById<CheckBox>(R.id.cbOffensive) to "Offensive",
-            dialogView.findViewById<CheckBox>(R.id.cbAbusing) to "Abusing",
-            dialogView.findViewById<CheckBox>(R.id.cbTelemarketing) to "Telemarketing",
-            dialogView.findViewById<CheckBox>(R.id.cbOther) to "Other"
-        )
-
-        AlertDialog.Builder(this)
-            .setView(dialogView)
-            .setPositiveButton(R.string.block_dialog_positive) { _, _ ->
-                val selectedReasons = checkBoxes.filter { it.first.isChecked }.map { it.second }
-                val suggestedNameInput = etSuggestedName.text.toString().trim()
-                val isForMeOnly = cbForMeOnly.isChecked
-                
-                val finalReasons = if (selectedReasons.isEmpty()) listOf(getString(R.string.default_spam_reason)) else selectedReasons
-                val finalName = if (suggestedNameInput.isNotEmpty()) suggestedNameInput else getString(R.string.default_spammer_name)
-
-                handleGlobalReport(number, finalName, finalReasons, isBlock = true, isForMeOnly = isForMeOnly)
-            }
-            .setNegativeButton(R.string.cancel, null)
-            .show()
-    }
-
-    private fun showReportConfirmDialog(number: String, name: String) {
-        AlertDialog.Builder(this)
-            .setTitle(R.string.report_number_title)
-            .setMessage(getString(R.string.report_number_message, number))
-            .setPositiveButton(R.string.report) { _, _ ->
-                handleGlobalReport(number, getString(R.string.default_spammer_name), listOf(getString(R.string.default_spam_reason)), isBlock = false, isForMeOnly = false)
-            }
-            .setNegativeButton(R.string.cancel, null)
-            .show()
-    }
-
-    private fun handleGlobalReport(number: String, finalName: String, reasons: List<String>, isBlock: Boolean, isForMeOnly: Boolean) {
-        val currentUser = auth.currentUser ?: return
-        val cleanNumber = normalizeNumber(number)
-        if (cleanNumber.isEmpty()) return
-
-        lifecycleScope.launch {
-            try {
-                val userProfile = db.collection("users").document(currentUser.uid).get().await()
-                val isAdmin = userProfile.getString("role") == "Admin"
-
-                val globalRef = db.collection("global_spam").document(cleanNumber)
-                val reportDoc = globalRef.collection("reports").document(currentUser.uid).get().await()
-
-                if (reportDoc.exists() && !isAdmin) {
-                    Toast.makeText(this@ContactDetailsActivity, R.string.already_reported, Toast.LENGTH_SHORT).show()
-                    if (isBlock) blockLocally(cleanNumber, finalName, reasons)
-                    return@launch
-                }
-
-                blockLocally(cleanNumber, finalName, reasons)
-
-                if (!isForMeOnly) {
-                    val globalDoc = globalRef.get().await()
-                    val exists = globalDoc.exists()
-                    
-                    val updates = mutableMapOf<String, Any>(
-                        "isVerifiedSpam" to true,
-                        "lastReported" to FieldValue.serverTimestamp(),
-                        "reportCount" to FieldValue.increment(1)
-                    )
-
-                    if (!exists || isAdmin) {
-                        updates["names"] = finalName
-                        updates["primaryName"] = finalName
-                    }
-
-                    reasons.forEach { reason ->
-                        val fieldName = reason.replace(" ", "")
-                        updates["reasonCounts.$fieldName"] = FieldValue.increment(1)
-                    }
-
-                    db.runTransaction { transaction ->
-                        transaction.set(globalRef, updates, SetOptions.merge())
-                        transaction.set(globalRef.collection("reports").document(currentUser.uid), mapOf(
-                            "uid" to currentUser.uid,
-                            "timestamp" to FieldValue.serverTimestamp(),
-                            "reasons" to reasons,
-                            "isBlock" to isBlock
-                        ))
-                    }.await()
-                }
-
-                Toast.makeText(this@ContactDetailsActivity, if (isForMeOnly) getString(R.string.blocked_locally) else getString(R.string.reported_successfully), Toast.LENGTH_SHORT).show()
-
-            } catch (e: Exception) {
-                FirestoreUi.handleFailure(this@ContactDetailsActivity, e, "ContactDetailsActivity")
-            }
+    private fun bindDisabledAction(viewId: Int, iconRes: Int, labelRes: Int, colorRes: Int, backgroundRes: Int = R.color.brand_white) {
+        bindAction(viewId, iconRes, labelRes, colorRes, backgroundRes) {
+            Toast.makeText(this, R.string.reset_flow_disabled, Toast.LENGTH_SHORT).show()
         }
     }
 
-    private suspend fun blockLocally(cleanNumber: String, finalName: String, reasons: List<String>) {
-        val currentUser = auth.currentUser ?: return
-        val userBlockRef = db.collection("users").document(currentUser.uid).collection("blocked_numbers").document(cleanNumber)
-        val personalUpdate = mapOf(
-            "number" to cleanNumber,
-            "name" to finalName,
-            "reasons" to reasons,
-            "timestamp" to FieldValue.serverTimestamp()
-        )
-        userBlockRef.set(personalUpdate).await()
-        isBlockedLocally = true
-        
-        if (isWhitelisted) {
-            db.collection("users").document(currentUser.uid).collection("white_list_numbers").document(cleanNumber).delete().await()
-            isWhitelisted = false
-            updateLocalWhitelistCache(cleanNumber, false)
-            withContext(Dispatchers.Main) { updateVerifiedButtonUI() }
+    private fun bindAction(
+        viewId: Int,
+        iconRes: Int,
+        labelRes: Int,
+        colorRes: Int,
+        backgroundRes: Int = R.color.brand_white,
+        onClick: () -> Unit
+    ) {
+        val actionView = findViewById<View>(viewId)
+        actionView.findViewById<ImageView>(R.id.ivActionIcon).apply {
+            setImageResource(iconRes)
+            setColorFilter(getColor(colorRes))
+            backgroundTintList = ColorStateList.valueOf(getColor(backgroundRes))
         }
-
-        updateLocalBlockCache(cleanNumber, true)
-
-        withContext(Dispatchers.Main) { 
-            val ivProfile: ShapeableImageView = findViewById(R.id.ivDetailProfile)
-            applyBlockedUI(ivProfile)
-            updateBlockButtonUI() 
-        }
-    }
-
-    private fun updateLocalBlockCache(number: String, isBlocking: Boolean) {
-        val cleanNumber = normalizeNumber(number)
-        val prefs = getSharedPreferences("BlockedNumbersCache", Context.MODE_PRIVATE)
-        val cachedSet = prefs.getStringSet("blocked_set", emptySet())?.toMutableSet() ?: mutableSetOf()
-        
-        if (isBlocking) {
-            cachedSet.add(cleanNumber)
-        } else {
-            cachedSet.remove(cleanNumber)
-        }
-        
-        prefs.edit { putStringSet("blocked_set", cachedSet) }
+        actionView.findViewById<TextView>(R.id.tvActionLabel).text = getString(labelRes)
+        actionView.setOnClickListener { onClick() }
     }
 
     private fun handleWhatsappClick(number: String) {
-        val prefs = getSharedPreferences("AppSettings", Context.MODE_PRIVATE)
-        val savedPkg = prefs.getString("default_whatsapp_pkg", null)
-        val installedApps = getInstalledWhatsappApps()
-        
-        if (installedApps.isEmpty()) {
+        val cleanNumber = PhoneNumberVariants.toIndianMobileDigits(number)
+            ?: PhoneNumberVariants.digitsOnly(number)
+        if (cleanNumber.isBlank()) {
+            Toast.makeText(this, R.string.could_not_open_whatsapp, Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val pkg = when {
+            isAppInstalled(whatsappPkg) -> whatsappPkg
+            isAppInstalled(whatsappBusinessPkg) -> whatsappBusinessPkg
+            else -> null
+        }
+
+        if (pkg == null) {
             Toast.makeText(this, R.string.whatsapp_not_installed, Toast.LENGTH_SHORT).show()
             return
         }
 
-        if (savedPkg != null && isAppInstalled(savedPkg)) {
-            openWhatsapp(number, savedPkg)
-        } else if (installedApps.size == 1) {
-            openWhatsapp(number, installedApps[0].packageName)
-        } else {
-            showWhatsappSelectionDialog(number, installedApps)
+        val uri = "https://api.whatsapp.com/send?phone=$cleanNumber".toUri()
+        val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+            setPackage(pkg)
         }
-    }
-
-    private fun getInstalledWhatsappApps(): List<WhatsappAppInfo> {
-        val apps = mutableListOf<WhatsappAppInfo>()
-        if (isAppInstalled(whatsappPkg)) apps.add(WhatsappAppInfo(getString(R.string.whatsapp), whatsappPkg))
-        if (isAppInstalled(whatsappBusinessPkg)) apps.add(WhatsappAppInfo("WhatsApp Business", whatsappBusinessPkg))
-        return apps
+        try {
+            startActivity(intent)
+        } catch (_: Exception) {
+            Toast.makeText(this, R.string.could_not_open_whatsapp, Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun isAppInstalled(packageName: String): Boolean {
         return try {
             packageManager.getPackageInfo(packageName, 0)
             true
-        } catch (e: PackageManager.NameNotFoundException) {
+        } catch (_: PackageManager.NameNotFoundException) {
             false
         }
     }
 
-    private fun showWhatsappSelectionDialog(number: String, apps: List<WhatsappAppInfo>) {
-        val names = apps.map { it.displayName }.toTypedArray()
-        var selectedIdx = 0
-        
-        AlertDialog.Builder(this)
-            .setTitle(R.string.select_whatsapp_version)
-            .setSingleChoiceItems(names, 0) { _, which ->
-                selectedIdx = which
+    private fun checkContactStatus(phoneNumber: String, label: TextView) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val uri = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(phoneNumber))
+            val projection = arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME)
+            var exists = false
+
+            try {
+                contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) exists = true
+                }
+            } catch (_: Exception) {
             }
-            .setPositiveButton(R.string.open) { _, _ ->
-                openWhatsapp(number, apps[selectedIdx].packageName)
+
+            withContext(Dispatchers.Main) {
+                label.visibility = if (exists) View.VISIBLE else View.GONE
             }
-            .setNeutralButton(R.string.always_use_this) { _, _ ->
-                getSharedPreferences("AppSettings", Context.MODE_PRIVATE)
-                    .edit { putString("default_whatsapp_pkg", apps[selectedIdx].packageName) }
-                openWhatsapp(number, apps[selectedIdx].packageName)
-            }
-            .setNegativeButton(R.string.cancel, null)
-            .show()
+        }
     }
 
-    private fun openWhatsapp(number: String, packageName: String) {
-        val cleanNumber = number.replace("[^0-9]".toRegex(), "")
-        val uri = "https://api.whatsapp.com/send?phone=$cleanNumber".toUri()
-        val intent = Intent(Intent.ACTION_VIEW, uri).apply {
-            setPackage(packageName)
+    private fun maybeResolveUnknownDetails() {
+        val initialName = intent.getStringExtra("name").orEmpty()
+        if (!isUnknownName(currentDisplayName) || findViewById<TextView>(R.id.tvInContactsLabel).visibility == View.VISIBLE) {
+            if (currentLookupSource == LookupSource.BLOCKED || currentLookupSource == LookupSource.SPAM) {
+                loadSpamReasonCounts()
+            }
+            return
         }
-        try {
-            startActivity(intent)
-        } catch (e: Exception) {
-            Toast.makeText(this, R.string.could_not_open_whatsapp, Toast.LENGTH_SHORT).show()
+
+        if (!isUnknownName(initialName) && !currentLookupSource.isNullOrBlank()) {
+            if (currentLookupSource == LookupSource.BLOCKED || currentLookupSource == LookupSource.SPAM) {
+                loadSpamReasonCounts()
+            }
+            return
+        }
+
+        getCachedLookup(contactNumber)?.let { cachedLookup ->
+            applyResolvedLookup(cachedLookup)
+            if (cachedLookup.source == LookupSource.BLOCKED || cachedLookup.source == LookupSource.SPAM) {
+                loadSpamReasonCounts()
+            }
+            return
+        }
+
+        Toast.makeText(this, getString(R.string.searching_number, contactNumber), Toast.LENGTH_SHORT).show()
+        lifecycleScope.launch(Dispatchers.IO) {
+            val resolved = fetchRemoteNameForNumber(contactNumber)
+            withContext(Dispatchers.Main) {
+                if (resolved != null) {
+                    persistResolvedLookup(contactNumber, resolved)
+                    applyResolvedLookup(resolved)
+                    Toast.makeText(
+                        this@ContactDetailsActivity,
+                        getString(R.string.found_number_as_name, contactNumber, resolved.name),
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } else {
+                    Toast.makeText(
+                        this@ContactDetailsActivity,
+                        getString(R.string.number_not_found, contactNumber),
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
+    }
+
+    private fun applyResolvedLookup(resolved: RemoteLookupResult) {
+        currentLookupSource = resolved.source
+        currentDisplayName = resolved.name
+        currentSpamReasonCounts = resolved.spamReasonCounts
+        findViewById<TextView>(R.id.tvDetailName).text = resolved.name
+        bindProfile(intent.getStringExtra("photoUri"), currentLookupSource, currentDisplayName)
+        bindActionButtons(contactNumber)
+        updateSpamInfoUi()
+    }
+
+    private fun loadSpamReasonCounts() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val spamInfo = lookupGlobalCollectionName(
+                firestore = FirebaseFirestore.getInstance(),
+                collectionName = "global_spam",
+                documentIds = buildLookupDocumentIds(contactNumber),
+                source = LookupSource.SPAM,
+                requestedNumber = contactNumber
+            )
+            withContext(Dispatchers.Main) {
+                currentSpamReasonCounts = spamInfo?.spamReasonCounts ?: emptyMap()
+                updateSpamInfoUi()
+            }
+        }
+    }
+
+    private fun updateSpamInfoUi() {
+        val container = findViewById<View>(R.id.spamInfoContainer)
+        val chipGroup = findViewById<ChipGroup>(R.id.chipSpamReasons)
+        if (currentSpamReasonCounts.isEmpty()) {
+            container.visibility = View.GONE
+            chipGroup.removeAllViews()
+            return
+        }
+
+        chipGroup.removeAllViews()
+        currentSpamReasonCounts
+            .toList()
+            .sortedByDescending { it.second }
+            .forEach { (reason, count) ->
+                val chip = Chip(this).apply {
+                    text = "$reason $count"
+                    isClickable = false
+                    isCheckable = false
+                    chipBackgroundColor = ColorStateList.valueOf(getColor(R.color.blocked_card_bg))
+                    setTextColor(getColor(R.color.brand_red))
+                    chipStrokeColor = ColorStateList.valueOf(getColor(R.color.brand_red))
+                    chipStrokeWidth = 1f
+                }
+                chipGroup.addView(chip)
+        }
+        container.visibility = View.VISIBLE
+    }
+
+    private fun updateCachedLookupAfterWhiteListChange(number: String, remove: Boolean) {
+        val snapshot = loadCacheSnapshot() ?: return
+        val updatedLogs = snapshot.logs.map { item ->
+            if (!sameNumber(item.number, number)) {
+                item
+            } else if (remove) {
+                item.copy(
+                    name = if (isUnknownName(item.name)) "" else item.name,
+                    lookupSource = null,
+                    isLookupInProgress = false
+                )
+            } else {
+                item.copy(
+                    name = currentDisplayName.ifBlank { number },
+                    lookupSource = LookupSource.WHITELIST,
+                    isLookupInProgress = false
+                )
+            }
+        }
+        saveCacheSnapshot(snapshot.copy(logs = updatedLogs))
+        saveSearchedUnknownNumbers(number)
+    }
+
+    private fun updateCachedLookupAfterBlockChange(
+        number: String,
+        remove: Boolean,
+        displayName: String,
+        spamReasonCounts: Map<String, Long>
+    ) {
+        val snapshot = loadCacheSnapshot() ?: return
+        val updatedLogs = snapshot.logs.map { item ->
+            if (!sameNumber(item.number, number)) {
+                item
+            } else if (remove) {
+                item.copy(
+                    name = if (isUnknownName(item.name)) "" else item.name,
+                    lookupSource = null,
+                    isLookupInProgress = false
+                )
+            } else {
+                item.copy(
+                    name = displayName.ifBlank { number },
+                    lookupSource = LookupSource.BLOCKED,
+                    isLookupInProgress = false
+                )
+            }
+        }
+        saveCacheSnapshot(snapshot.copy(logs = updatedLogs))
+        saveSearchedUnknownNumbers(number)
+        currentSpamReasonCounts = if (remove) emptyMap() else spamReasonCounts
+    }
+
+    private fun toggleBlock() {
+        if (currentIsBlockedByUser) {
+            unblockNumber()
+        } else {
+            showBlockDialog()
+        }
+    }
+
+    private fun showBlockDialog() {
+        val dialogView = LayoutInflater.from(this).inflate(R.layout.dialog_block_number, null, false)
+        val nameInput = dialogView.findViewById<EditText>(R.id.etBlockName)
+        val forMeOnly = dialogView.findViewById<CheckBox>(R.id.cbForMeOnly)
+        val reasonChecks = linkedMapOf(
+            "Spam" to dialogView.findViewById<CheckBox>(R.id.cbReasonSpam),
+            "Harassment" to dialogView.findViewById<CheckBox>(R.id.cbReasonHarassment),
+            "Fraud" to dialogView.findViewById<CheckBox>(R.id.cbReasonFraud),
+            "Offensive" to dialogView.findViewById<CheckBox>(R.id.cbReasonOffensive),
+            "Abusing" to dialogView.findViewById<CheckBox>(R.id.cbReasonAbusing),
+            "Telemarketing" to dialogView.findViewById<CheckBox>(R.id.cbReasonTelemarketing),
+            "Other" to dialogView.findViewById<CheckBox>(R.id.cbReasonOther)
+        )
+
+        forMeOnly.setOnCheckedChangeListener { _, isChecked ->
+            reasonChecks.values.forEach { checkbox ->
+                checkbox.isEnabled = !isChecked
+                if (isChecked) checkbox.isChecked = false
+            }
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setView(dialogView)
+            .setNegativeButton(R.string.cancel, null)
+            .setPositiveButton(R.string.block_dialog_positive, null)
+            .create()
+
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val selectedReasons = reasonChecks.filterValues { it.isChecked }.keys.toList()
+                if (forMeOnly.isChecked && selectedReasons.isNotEmpty()) {
+                    Toast.makeText(this, R.string.for_me_only_conflict, Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                dialog.dismiss()
+                blockNumber(
+                    selectedReasons = selectedReasons,
+                    forMeOnly = forMeOnly.isChecked,
+                    customName = nameInput.text?.toString().orEmpty()
+                )
+            }
+        }
+        dialog.show()
+    }
+
+    private fun blockNumber(selectedReasons: List<String>, forMeOnly: Boolean, customName: String) {
+        val userId = FirebaseAuth.getInstance().currentUser?.uid ?: return
+        val normalizedNumber = normalizeLookupNumber(contactNumber) ?: contactNumber
+        val documentId = normalizedNumber.removePrefix("+")
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val firestore = FirebaseFirestore.getInstance()
+                val userRef = firestore.collection("users").document(userId)
+                val whiteListRef = userRef.collection("white_list_numbers").document(documentId)
+                if (whiteListRef.get().await().exists()) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(this@ContactDetailsActivity, R.string.already_in_white_list_remove_first, Toast.LENGTH_LONG).show()
+                    }
+                    return@launch
+                }
+
+                val userRole = userRef.get().await().getString("role").orEmpty()
+                val isAdmin = userRole.equals("admin", ignoreCase = true)
+                val resolvedName = resolveBlockedDisplayName(customName, selectedReasons, normalizedNumber)
+                val reasonsToApply = if (forMeOnly) emptyList() else selectedReasons.ifEmpty { listOf("Spam") }
+                val partialSpamDocRef = firestore.collection("partial_global_spam_list").document(normalizedNumber)
+                val spamDocRef = firestore.collection("global_spam").document(normalizedNumber)
+                val reporterMarkerRef = partialSpamDocRef.collection("reporters").document(userId)
+                val spamResult = if (forMeOnly) {
+                    SpamUpdateResult(false, 0L, emptyMap())
+                } else {
+                    firestore.runTransaction { transaction ->
+                        val partialSnapshot = transaction.get(partialSpamDocRef)
+                        val spamSnapshot = transaction.get(spamDocRef)
+                        val reporterSnapshot = transaction.get(reporterMarkerRef)
+                        val currentPartialCount = partialSnapshot.getLong("reportCount")
+                            ?: spamSnapshot.getLong("reportCount")
+                            ?: 0L
+                        val currentReasonCounts = extractReasonCounts(
+                            partialSnapshot.get("reasonCounts"),
+                            partialSnapshot.data
+                        ).ifEmpty {
+                            extractReasonCounts(spamSnapshot.get("reasonCounts"), spamSnapshot.data)
+                        }
+                        val isAlreadyVerified = (spamSnapshot.getBoolean("isVerifiedSpam") == true) ||
+                            (partialSnapshot.getBoolean("isVerifiedSpam") == true)
+                        val alreadyReportedByUser = reporterSnapshot.exists()
+                        val incrementedCount = if (alreadyReportedByUser) currentPartialCount else currentPartialCount + 1L
+                        val promotedCount = when {
+                            !alreadyReportedByUser && isAdmin && incrementedCount < 10L -> 10L
+                            else -> incrementedCount
+                        }
+                        val shouldVerifySpam = isAlreadyVerified || isAdmin || promotedCount >= 10L
+
+                        val mergedReasons = if (alreadyReportedByUser) {
+                            currentReasonCounts
+                        } else {
+                            currentReasonCounts.toMutableMap().apply {
+                                reasonsToApply.forEach { reason ->
+                                    this[reason] = (this[reason] ?: 0L) + 1L
+                                }
+                            }.toMap()
+                        }
+
+                        if (!alreadyReportedByUser) {
+                            transaction.set(
+                                reporterMarkerRef,
+                                hashMapOf(
+                                    "uid" to userId,
+                                    "reportedAt" to FieldValue.serverTimestamp(),
+                                    "reportedByRole" to if (isAdmin) "Admin" else "Guest",
+                                    "number" to normalizedNumber
+                                ),
+                                SetOptions.merge()
+                            )
+                        }
+
+                        val partialUpdates = hashMapOf<String, Any>(
+                            "phoneNumber" to normalizedNumber,
+                            "number" to normalizedNumber,
+                            "primaryName" to resolvedName,
+                            "names" to resolvedName,
+                            "isVerifiedSpam" to shouldVerifySpam,
+                            "reportCount" to promotedCount,
+                            "updated_at" to FieldValue.serverTimestamp()
+                        )
+                        if (!alreadyReportedByUser) {
+                            partialUpdates["lastReported"] = FieldValue.serverTimestamp()
+                            reasonsToApply.forEach { reason ->
+                                partialUpdates["reasonCounts.$reason"] = mergedReasons[reason] ?: 1L
+                            }
+                        }
+                        transaction.set(partialSpamDocRef, partialUpdates, SetOptions.merge())
+
+                        if (shouldVerifySpam) {
+                            val globalUpdates = hashMapOf<String, Any>(
+                                "phoneNumber" to normalizedNumber,
+                                "number" to normalizedNumber,
+                                "primaryName" to resolvedName,
+                                "names" to resolvedName,
+                                "isVerifiedSpam" to true,
+                                "reportCount" to promotedCount,
+                                "updated_at" to FieldValue.serverTimestamp()
+                            )
+                            if (!alreadyReportedByUser) {
+                                globalUpdates["lastReported"] = FieldValue.serverTimestamp()
+                                reasonsToApply.forEach { reason ->
+                                    globalUpdates["reasonCounts.$reason"] = mergedReasons[reason] ?: 1L
+                                }
+                            } else if (!spamSnapshot.exists()) {
+                                mergedReasons.forEach { (reason, count) ->
+                                    globalUpdates["reasonCounts.$reason"] = count
+                                }
+                            }
+                            transaction.set(spamDocRef, globalUpdates, SetOptions.merge())
+                        }
+
+                        SpamUpdateResult(
+                            isVerifiedSpam = shouldVerifySpam,
+                            reportCount = promotedCount,
+                            reasonCounts = mergedReasons
+                        )
+                    }.await()
+                }
+
+                userRef.collection("blocked_numbers")
+                    .document(documentId)
+                    .set(
+                        hashMapOf(
+                            "name" to resolvedName,
+                            "primaryName" to resolvedName,
+                            "number" to normalizedNumber,
+                            "phoneNumber" to normalizedNumber,
+                            "forMeOnly" to forMeOnly,
+                            "reasons" to reasonsToApply,
+                            "isVerifiedSpam" to spamResult.isVerifiedSpam,
+                            "reportCount" to spamResult.reportCount,
+                            "updatedAt" to System.currentTimeMillis()
+                        ),
+                        SetOptions.merge()
+                    )
+                    .await()
+
+                withContext(Dispatchers.Main) {
+                    currentDisplayName = resolvedName
+                    currentLookupSource = LookupSource.BLOCKED
+                    currentIsBlockedByUser = true
+                    currentIsWhitelistedByUser = false
+                    updateCachedLookupAfterBlockChange(normalizedNumber, false, resolvedName, spamResult.reasonCounts)
+                    bindProfile(intent.getStringExtra("photoUri"), currentLookupSource, currentDisplayName)
+                    findViewById<TextView>(R.id.tvDetailName).text = currentDisplayName
+                    bindActionButtons(contactNumber)
+                    updateSpamInfoUi()
+                    Toast.makeText(
+                        this@ContactDetailsActivity,
+                        if (forMeOnly) R.string.blocked_for_me_only else R.string.added_to_block_list,
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    FirestoreUi.handleFailure(this@ContactDetailsActivity, e, "BlockToggle")
+                }
+            }
+        }
+    }
+
+    private fun unblockNumber() {
+        val userId = FirebaseAuth.getInstance().currentUser?.uid ?: return
+        val normalizedNumber = normalizeLookupNumber(contactNumber) ?: contactNumber
+        val documentId = normalizedNumber.removePrefix("+")
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                FirebaseFirestore.getInstance()
+                    .collection("users")
+                    .document(userId)
+                    .collection("blocked_numbers")
+                    .document(documentId)
+                    .delete()
+                    .await()
+
+                val resolved = fetchRemoteNameForNumber(contactNumber)
+                withContext(Dispatchers.Main) {
+                    currentIsBlockedByUser = false
+                    updateCachedLookupAfterBlockChange(normalizedNumber, true, "", emptyMap())
+                    if (resolved != null) {
+                        persistResolvedLookup(contactNumber, resolved)
+                        applyResolvedLookup(resolved)
+                    } else {
+                        currentLookupSource = null
+                        currentSpamReasonCounts = emptyMap()
+                        currentDisplayName = contactNumber
+                        findViewById<TextView>(R.id.tvDetailName).text = currentDisplayName
+                        bindProfile(intent.getStringExtra("photoUri"), currentLookupSource, currentDisplayName)
+                        bindActionButtons(contactNumber)
+                        updateSpamInfoUi()
+                    }
+                    Toast.makeText(this@ContactDetailsActivity, R.string.removed_from_block_list, Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    FirestoreUi.handleFailure(this@ContactDetailsActivity, e, "UnblockToggle")
+                }
+            }
+        }
+    }
+
+    private fun resolveBlockedDisplayName(customName: String, selectedReasons: List<String>, normalizedNumber: String): String {
+        val trimmedName = customName.trim()
+        return when {
+            trimmedName.isNotBlank() -> trimmedName
+            selectedReasons.isNotEmpty() -> selectedReasons.first()
+            else -> getString(R.string.default_spam_reason).ifBlank { normalizedNumber }
+        }
+    }
+
+    private fun toggleWhiteList() {
+        val userId = FirebaseAuth.getInstance().currentUser?.uid ?: return
+        val normalizedNumber = normalizeLookupNumber(contactNumber) ?: contactNumber
+        val documentId = normalizedNumber.removePrefix("+")
+        val isCurrentlyVerified = currentLookupSource == LookupSource.WHITELIST ||
+            currentLookupSource == LookupSource.VERIFIED
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val firestore = FirebaseFirestore.getInstance()
+                val userRef = firestore
+                    .collection("users")
+                    .document(userId)
+                val docRef = userRef
+                    .collection("white_list_numbers")
+                    .document(documentId)
+
+                if (isCurrentlyVerified) {
+                    docRef.delete().await()
+                } else {
+                    val blockedRef = userRef.collection("blocked_numbers").document(documentId)
+                    if (blockedRef.get().await().exists()) {
+                        blockedRef.delete().await()
+                    }
+                    docRef.set(
+                        hashMapOf(
+                            "name" to currentDisplayName.ifBlank { normalizedNumber },
+                            "number" to normalizedNumber,
+                            "updatedAt" to System.currentTimeMillis()
+                        ),
+                        SetOptions.merge()
+                    ).await()
+                }
+
+                withContext(Dispatchers.Main) {
+                    if (isCurrentlyVerified) {
+                        currentIsWhitelistedByUser = false
+                        currentLookupSource = null
+                        currentSpamReasonCounts = emptyMap()
+                        Toast.makeText(this@ContactDetailsActivity, R.string.removed_from_white_list_short, Toast.LENGTH_SHORT).show()
+                    } else {
+                        currentIsBlockedByUser = false
+                        currentIsWhitelistedByUser = true
+                        currentLookupSource = LookupSource.WHITELIST
+                        currentSpamReasonCounts = emptyMap()
+                        Toast.makeText(this@ContactDetailsActivity, R.string.added_to_white_list_short, Toast.LENGTH_SHORT).show()
+                    }
+                    updateCachedLookupAfterWhiteListChange(normalizedNumber, isCurrentlyVerified)
+                    bindProfile(intent.getStringExtra("photoUri"), currentLookupSource, currentDisplayName)
+                    bindActionButtons(contactNumber)
+                    updateSpamInfoUi()
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    FirestoreUi.handleFailure(this@ContactDetailsActivity, e, "WhiteListToggle")
+                }
+            }
         }
     }
 
     private fun loadActualCallHistory(contactNumber: String) {
         val container: LinearLayout = findViewById(R.id.llCallHistoryContainer)
-        
+
         lifecycleScope.launch(Dispatchers.IO) {
             val historyList = mutableListOf<CallHistoryItem>()
-            val normalizedSearch = contactNumber.replace("\\s".toRegex(), "").takeLast(10)
+            val normalizedSearch = PhoneNumberVariants.toLocalTenDigits(contactNumber)
+                ?: PhoneNumberVariants.digitsOnly(contactNumber).takeLast(10)
 
             val cursor: Cursor? = contentResolver.query(
                 CallLog.Calls.CONTENT_URI,
@@ -622,31 +889,33 @@ class ContactDetailsActivity : AppCompatActivity() {
                     val type = it.getInt(typeIdx)
                     val date = it.getLong(dateIdx)
                     val durationSeconds = it.getLong(durIdx)
-                    val subscriptionId = try { it.getInt(accIdx) } catch (e: Exception) { -1 }
-
-                    val callTypeStr = when (type) {
-                        CallLog.Calls.INCOMING_TYPE -> "Incoming"
-                        CallLog.Calls.OUTGOING_TYPE -> "Outgoing"
-                        CallLog.Calls.MISSED_TYPE -> "Missed"
-                        else -> "Incoming"
-                    }
-                    
-                    val iconRes = when (type) {
-                        CallLog.Calls.INCOMING_TYPE -> R.drawable.ic_call_incoming
-                        CallLog.Calls.OUTGOING_TYPE -> R.drawable.ic_call_outgoing
-                        CallLog.Calls.MISSED_TYPE, CallLog.Calls.REJECTED_TYPE -> R.drawable.ic_call_missed
-                        else -> R.drawable.ic_call_incoming
+                    val subscriptionId = try {
+                        if (accIdx >= 0) it.getInt(accIdx) else -1
+                    } catch (_: Exception) {
+                        -1
                     }
 
-                    historyList.add(CallHistoryItem(
-                        time = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(date)),
-                        type = callTypeStr,
-                        number = number,
-                        sim = if (subscriptionId <= 0) "1" else "2",
-                        duration = formatDuration(durationSeconds),
-                        iconRes = iconRes,
-                        timestamp = date
-                    ))
+                    historyList.add(
+                        CallHistoryItem(
+                            time = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(date)),
+                            type = when (type) {
+                                CallLog.Calls.INCOMING_TYPE -> "Incoming"
+                                CallLog.Calls.OUTGOING_TYPE -> "Outgoing"
+                                CallLog.Calls.MISSED_TYPE -> "Missed"
+                                else -> "Incoming"
+                            },
+                            number = number,
+                            sim = if (subscriptionId <= 0) "1" else "2",
+                            duration = formatDuration(durationSeconds),
+                            iconRes = when (type) {
+                                CallLog.Calls.INCOMING_TYPE -> R.drawable.ic_call_incoming
+                                CallLog.Calls.OUTGOING_TYPE -> R.drawable.ic_call_outgoing
+                                CallLog.Calls.MISSED_TYPE, CallLog.Calls.REJECTED_TYPE -> R.drawable.ic_call_missed
+                                else -> R.drawable.ic_call_incoming
+                            },
+                            timestamp = date
+                        )
+                    )
                 }
             }
 
@@ -660,7 +929,7 @@ class ContactDetailsActivity : AppCompatActivity() {
     private fun renderCallHistory(history: Map<String, List<CallHistoryItem>>, container: LinearLayout) {
         container.removeAllViews()
         val inflater = LayoutInflater.from(this)
-        
+
         history.forEach { (date, items) ->
             val groupView = inflater.inflate(R.layout.item_call_history_group, container, false)
             groupView.findViewById<TextView>(R.id.tvDateGroup).text = date
@@ -673,11 +942,10 @@ class ContactDetailsActivity : AppCompatActivity() {
                 itemView.findViewById<TextView>(R.id.tvPhoneNumber).text = item.number
                 itemView.findViewById<TextView>(R.id.tvSimLabel).text = item.sim
                 itemView.findViewById<TextView>(R.id.tvDuration).text = item.duration
-                
+
                 val ivIcon = itemView.findViewById<ImageView>(R.id.ivCallType)
                 ivIcon.setImageResource(item.iconRes)
-                
-                val iconColor = when(item.type) {
+                val iconColor = when (item.type) {
                     "Incoming" -> R.color.verified_green
                     "Missed" -> R.color.brand_red
                     "Outgoing" -> R.color.outgoing_blue
@@ -686,26 +954,30 @@ class ContactDetailsActivity : AppCompatActivity() {
                 ivIcon.imageTintList = ColorStateList.valueOf(getColor(iconColor))
 
                 itemsLayout.addView(itemView)
-                
+
                 if (index < items.size - 1) {
                     val divider = View(this).apply {
-                        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1).apply {
-                            marginStart = 120 
+                        layoutParams = LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            1
+                        ).apply {
+                            marginStart = 120
                         }
                         setBackgroundColor(Color.parseColor("#1A000000"))
                     }
                     itemsLayout.addView(divider)
                 }
             }
+
             container.addView(groupView)
         }
     }
 
     private fun formatDuration(seconds: Long): String {
         if (seconds <= 0) return ""
-        val m = seconds / 60
-        val s = seconds % 60
-        return if (m > 0) "${m}m ${s}s" else "${s}s"
+        val minutes = seconds / 60
+        val remainingSeconds = seconds % 60
+        return if (minutes > 0) "${minutes}m ${remainingSeconds}s" else "${remainingSeconds}s"
     }
 
     private fun getGroupDate(timestamp: Long): String {
@@ -726,5 +998,357 @@ class ContactDetailsActivity : AppCompatActivity() {
         val timestamp: Long
     )
 
-    data class WhatsappAppInfo(val displayName: String, val packageName: String)
+    private fun syncContactsToDb(force: Boolean = false) {
+        val userId = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid ?: return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+            return
+        }
+        lifecycleScope.launch {
+            try {
+                ContactSyncManager.syncIfNeeded(this@ContactDetailsActivity, userId, force)
+            } catch (e: Exception) {
+                FirestoreUi.handleFailure(this@ContactDetailsActivity, e, "ContactSyncManager")
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        observerHandler.removeCallbacksAndMessages(null)
+        pollHandler.removeCallbacksAndMessages(null)
+        super.onDestroy()
+    }
+
+    private suspend fun fetchRemoteNameForNumber(number: String): RemoteLookupResult? {
+        val firestore = FirebaseFirestore.getInstance()
+        val documentIds = buildLookupDocumentIds(number)
+        if (documentIds.isEmpty()) return null
+
+        val userId = FirebaseAuth.getInstance().currentUser?.uid
+        var matchedSource: String? = null
+        var matchedName: String? = null
+        var spamReasonCounts: Map<String, Long> = emptyMap()
+
+        if (!userId.isNullOrBlank()) {
+            lookupUserSubcollectionName(firestore, userId, "blocked_numbers", documentIds, LookupSource.BLOCKED.toString(), number)?.let { probe ->
+                matchedSource = matchedSource ?: probe.source
+                if (matchedName.isNullOrBlank() && !probe.name.isNullOrBlank()) {
+                    matchedName = probe.name
+                }
+            }
+            lookupUserSubcollectionName(firestore, userId, "white_list_numbers", documentIds, LookupSource.WHITELIST.toString(), number)?.let { probe ->
+                matchedSource = matchedSource ?: probe.source
+                if (matchedName.isNullOrBlank() && !probe.name.isNullOrBlank()) {
+                    matchedName = probe.name
+                }
+            }
+        }
+
+        lookupGlobalCollectionName(firestore, "global_verifed", documentIds, LookupSource.VERIFIED, number)?.let { probe ->
+            matchedSource = matchedSource ?: probe.source
+            if (matchedName.isNullOrBlank() && !probe.name.isNullOrBlank()) {
+                matchedName = probe.name
+            }
+        }
+        lookupGlobalCollectionName(firestore, "global_verified", documentIds, LookupSource.VERIFIED, number)?.let { probe ->
+            matchedSource = matchedSource ?: probe.source
+            if (matchedName.isNullOrBlank() && !probe.name.isNullOrBlank()) {
+                matchedName = probe.name
+            }
+        }
+        lookupGlobalCollectionName(firestore, "global_spam", documentIds, LookupSource.SPAM, number)?.let { probe ->
+            if (spamReasonCounts.isEmpty() && probe.spamReasonCounts.isNotEmpty()) {
+                spamReasonCounts = probe.spamReasonCounts
+            }
+            if (matchedSource.isNullOrBlank()) {
+                matchedSource = probe.source
+            }
+            if (matchedName.isNullOrBlank() && !probe.name.isNullOrBlank()) {
+                matchedName = probe.name
+            }
+        }
+
+        lookupAllUsersContactsName(firestore, documentIds, LookupSource.USER_CONTACT.toString(), number)?.let { probe ->
+            if (matchedSource.isNullOrBlank()) {
+                matchedSource = probe.source
+            }
+            if (matchedName.isNullOrBlank() && !probe.name.isNullOrBlank()) {
+                matchedName = probe.name
+            }
+        }
+
+        return matchedSource?.let { RemoteLookupResult(matchedName ?: number, it, spamReasonCounts) }
+    }
+
+    private suspend fun lookupUserSubcollectionName(
+        firestore: FirebaseFirestore,
+        userId: String,
+        subcollection: String,
+        documentIds: List<String>,
+        source: String,
+        requestedNumber: String
+    ): LookupProbeResult? {
+        val userDocIds = documentIds.flatMap { listOf(it, it.removePrefix("+")) }.distinct()
+        for (documentId in userDocIds) {
+            val snapshot = firestore.collection("users")
+                .document(userId)
+                .collection(subcollection)
+                .document(documentId)
+                .get()
+                .await()
+            if (snapshot.exists()) {
+                return LookupProbeResult(
+                    name = extractResolvedName(requestedNumber, snapshot.getString("primaryName"), snapshot.getString("name")),
+                    source = source
+                )
+            }
+        }
+        return null
+    }
+
+    private suspend fun lookupGlobalCollectionName(
+        firestore: FirebaseFirestore,
+        collectionName: String,
+        documentIds: List<String>,
+        source: String,
+        requestedNumber: String
+    ): LookupProbeResult? {
+        for (documentId in documentIds) {
+            val snapshot = firestore.collection(collectionName).document(documentId).get().await()
+            if (snapshot.exists()) {
+                return LookupProbeResult(
+                    name = extractResolvedName(requestedNumber, snapshot.getString("primaryName"), snapshot.getString("name")),
+                    source = source,
+                    spamReasonCounts = extractReasonCounts(snapshot.get("reasonCounts"), snapshot.data)
+                )
+            }
+        }
+
+        val queryCandidates = documentIds.distinct().take(10)
+        if (queryCandidates.isEmpty()) return null
+
+        firestore.collection(collectionName)
+            .whereIn("phoneNumber", queryCandidates)
+            .get()
+            .await()
+            .documents
+            .firstOrNull()
+            ?.let { document ->
+                return LookupProbeResult(
+                    name = extractResolvedName(requestedNumber, document.getString("primaryName"), document.getString("name")),
+                    source = source,
+                    spamReasonCounts = extractReasonCounts(document.get("reasonCounts"), document.data)
+                )
+            }
+
+        firestore.collection(collectionName)
+            .whereIn("number", queryCandidates)
+            .get()
+            .await()
+            .documents
+            .firstOrNull()
+            ?.let { document ->
+                return LookupProbeResult(
+                    name = extractResolvedName(requestedNumber, document.getString("primaryName"), document.getString("name")),
+                    source = source,
+                    spamReasonCounts = extractReasonCounts(document.get("reasonCounts"), document.data)
+                )
+            }
+
+        return null
+    }
+
+    private suspend fun lookupAllUsersContactsName(
+        firestore: FirebaseFirestore,
+        documentIds: List<String>,
+        source: String,
+        requestedNumber: String
+    ): LookupProbeResult? {
+        val queryCandidates = documentIds
+            .flatMap { listOf(it, it.removePrefix("+")) }
+            .distinct()
+            .take(10)
+        if (queryCandidates.isEmpty()) return null
+
+        firestore.collectionGroup("contacts")
+            .whereIn("phoneNumber", queryCandidates)
+            .get()
+            .await()
+            .documents
+            .firstOrNull()
+            ?.let { document ->
+                return LookupProbeResult(
+                    name = extractResolvedName(requestedNumber, document.getString("primaryName"), document.getString("name")),
+                    source = source
+                )
+            }
+
+        firestore.collectionGroup("contacts")
+            .whereIn("number", queryCandidates)
+            .get()
+            .await()
+            .documents
+            .firstOrNull()
+            ?.let { document ->
+                return LookupProbeResult(
+                    name = extractResolvedName(requestedNumber, document.getString("primaryName"), document.getString("name")),
+                    source = source
+                )
+            }
+
+        return null
+    }
+
+    private fun extractResolvedName(requestedNumber: String, vararg candidates: String?): String? {
+        return candidates.firstNotNullOfOrNull { candidate ->
+            val trimmed = candidate?.trim().orEmpty()
+            when {
+                trimmed.isBlank() -> null
+                PhoneNumberVariants.sameNumber(trimmed, requestedNumber) -> null
+                else -> trimmed
+            }
+        }
+    }
+
+    private fun extractReasonCounts(rawValue: Any?, documentData: Map<String, Any?>? = null): Map<String, Long> {
+        val nestedMap = (rawValue as? Map<*, *>)?.entries?.mapNotNull { (key, value) ->
+            val reason = key?.toString()?.trim().orEmpty()
+            val count = when (value) {
+                is Number -> value.toLong()
+                is String -> value.toLongOrNull()
+                else -> null
+            }
+            if (reason.isBlank() || count == null || count <= 0L) null else reason to count
+        }?.toMap().orEmpty()
+
+        if (nestedMap.isNotEmpty()) return nestedMap
+
+        val dottedMap = documentData.orEmpty().entries.mapNotNull { (key, value) ->
+            if (!key.startsWith("reasonCounts.")) return@mapNotNull null
+            val reason = key.removePrefix("reasonCounts.").trim()
+            val count = when (value) {
+                is Number -> value.toLong()
+                is String -> value.toLongOrNull()
+                else -> null
+            }
+            if (reason.isBlank() || count == null || count <= 0L) null else reason to count
+        }.toMap()
+
+        return dottedMap
+    }
+
+    private fun normalizeLookupNumber(number: String): String? {
+        return PhoneNumberVariants.toIndianMobilePlus(number)
+            ?: PhoneNumberVariants.digitsOnly(number).takeIf { it.isNotBlank() }?.let { "+$it" }
+    }
+
+    private fun sameNumber(first: String, second: String): Boolean {
+        return PhoneNumberVariants.sameNumber(first, second)
+    }
+
+    private fun buildLookupDocumentIds(number: String): List<String> {
+        return PhoneNumberVariants.buildFirestoreDocumentIds(number)
+    }
+
+    private fun getCachedLookup(number: String): RemoteLookupResult? {
+        val snapshot = loadCacheSnapshot() ?: return null
+        return snapshot.logs.firstOrNull {
+            it.number == number && !it.lookupSource.isNullOrBlank() && !isUnknownName(it.name)
+        }?.let { RemoteLookupResult(it.name, it.lookupSource!!, emptyMap()) }
+    }
+
+    private fun persistResolvedLookup(number: String, resolved: RemoteLookupResult) {
+        val snapshot = loadCacheSnapshot() ?: return
+        val updatedLogs = snapshot.logs.map { item ->
+            if (item.number == number) {
+                item.copy(name = resolved.name, lookupSource = resolved.source, isLookupInProgress = false)
+            } else {
+                item
+            }
+        }
+
+        saveCacheSnapshot(snapshot.copy(logs = updatedLogs))
+        saveSearchedUnknownNumbers(number)
+    }
+
+    private fun loadCacheSnapshot(): DetailsCacheSnapshot? {
+        val prefs = getSharedPreferences(CACHE_PREFS, MODE_PRIVATE)
+        val json = prefs.getString(CACHE_KEY, null) ?: return null
+        return runCatching {
+            gson.fromJson<DetailsCacheSnapshot>(json, object : TypeToken<DetailsCacheSnapshot>() {}.type)
+        }.getOrNull()
+    }
+
+    private fun saveCacheSnapshot(snapshot: DetailsCacheSnapshot) {
+        val prefs = getSharedPreferences(CACHE_PREFS, MODE_PRIVATE)
+        prefs.edit().putString(CACHE_KEY, gson.toJson(snapshot)).apply()
+    }
+
+    private fun saveSearchedUnknownNumbers(number: String) {
+        val prefs = getSharedPreferences(CACHE_PREFS, MODE_PRIVATE)
+        val values = prefs.getStringSet(SEARCHED_UNKNOWN_KEY, emptySet())?.toMutableSet() ?: mutableSetOf()
+        values += number
+        prefs.edit().putStringSet(SEARCHED_UNKNOWN_KEY, values).apply()
+    }
+
+    private fun isUnknownName(name: String?): Boolean {
+        val trimmed = name?.trim().orEmpty()
+        return trimmed.isBlank() || trimmed == contactNumber
+    }
+
+    private fun getInitials(name: String): String {
+        val parts = name.trim().split("\\s+".toRegex())
+        return if (parts.size >= 2) {
+            (parts[0].firstOrNull()?.toString().orEmpty() + parts[1].firstOrNull()?.toString().orEmpty()).uppercase()
+        } else {
+            parts.firstOrNull()?.firstOrNull()?.toString()?.uppercase().orEmpty().ifBlank { "?" }
+        }
+    }
+
+    private fun headerBackgroundColorRes(lookupSource: String?): Int {
+        return when (lookupSource) {
+            LookupSource.BLOCKED, LookupSource.SPAM -> R.color.brand_red
+            LookupSource.WHITELIST -> R.color.verified_green
+            LookupSource.VERIFIED -> R.color.outgoing_blue
+            LookupSource.USER_CONTACT -> R.color.brand_black
+            else -> R.color.brand_black
+        }
+    }
+
+    private data class RemoteLookupResult(
+        val name: String,
+        val source: String,
+        val spamReasonCounts: Map<String, Long> = emptyMap()
+    )
+
+    private data class LookupProbeResult(
+        val name: String?,
+        val source: String,
+        val spamReasonCounts: Map<String, Long> = emptyMap()
+    )
+
+    private data class SpamUpdateResult(
+        val isVerifiedSpam: Boolean,
+        val reportCount: Long,
+        val reasonCounts: Map<String, Long>
+    )
+
+    private data class DetailsCacheSnapshot(
+        val latestId: String? = null,
+        val latestDate: Long = 0L,
+        val logs: List<CallLogItem> = emptyList()
+    )
+
+    private object LookupSource {
+        const val BLOCKED = "blocked"
+        const val SPAM = "spam"
+        const val WHITELIST = "whitelist"
+        const val VERIFIED = "verified"
+        const val USER_CONTACT = "user_contact"
+    }
+
+    companion object {
+        private const val CACHE_PREFS = "call_log_cache"
+        private const val CACHE_KEY = "call_log_snapshot"
+        private const val SEARCHED_UNKNOWN_KEY = "searched_unknown_numbers"
+    }
 }

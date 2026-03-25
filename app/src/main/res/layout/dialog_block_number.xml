@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingTop="8dp"
+        android:paddingBottom="4dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/select_block_reason"
+            android:textColor="@color/brand_black"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/etBlockName"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:hint="@string/suggest_name_optional"
+            android:inputType="textPersonName"
+            android:maxLines="1"
+            android:textColor="@color/brand_black"
+            android:textColorHint="@color/text_secondary" />
+
+        <CheckBox
+            android:id="@+id/cbForMeOnly"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/reason_me_only"
+            android:textColor="@color/brand_black" />
+
+        <CheckBox
+            android:id="@+id/cbReasonSpam"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/reason_spam"
+            android:textColor="@color/brand_black" />
+
+        <CheckBox
+            android:id="@+id/cbReasonHarassment"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/reason_harassment"
+            android:textColor="@color/brand_black" />
+
+        <CheckBox
+            android:id="@+id/cbReasonFraud"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/reason_fraud_calls"
+            android:textColor="@color/brand_black" />
+
+        <CheckBox
+            android:id="@+id/cbReasonOffensive"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/reason_offensive"
+            android:textColor="@color/brand_black" />
+
+        <CheckBox
+            android:id="@+id/cbReasonAbusing"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/reason_abusing"
+            android:textColor="@color/brand_black" />
+
+        <CheckBox
+            android:id="@+id/cbReasonTelemarketing"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/reason_telemarketing"
+            android:textColor="@color/brand_black" />
+
+        <CheckBox
+            android:id="@+id/cbReasonOther"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/reason_other"
+            android:textColor="@color/brand_black" />
+    </LinearLayout>
+</ScrollView>

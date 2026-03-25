@@ -7,8 +7,6 @@ import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
 import android.net.Uri
-import android.os.Build
-import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.ContactsContract
@@ -19,9 +17,10 @@ import android.util.Log
 
 class NotificationBlockerService : NotificationListenerService() {
 
+    private val whatsAppPackages = setOf("com.whatsapp", "com.whatsapp.w4b")
     private lateinit var audioManager: AudioManager
     private lateinit var notificationManager: NotificationManager
-    
+
     private var isBlockingWhatsAppCall = false
     private var originalFilter: Int = -1
     private var originalRingerMode: Int = -1
@@ -35,89 +34,61 @@ class NotificationBlockerService : NotificationListenerService() {
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        val packageName = sbn.packageName
-        if (packageName != "com.whatsapp" && packageName != "com.whatsapp.w4b") return
+        if (!whatsAppPackages.contains(sbn.packageName)) return
 
         val notification = sbn.notification
         val extras = notification.extras
-        
+
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
         val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
-        val subText = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString() ?: ""
-        val tickerText = notification.tickerText?.toString() ?: ""
 
-        Log.d("NotificationBlocker", "Posted: $packageName | Title: $title | Text: $text")
-
-        // Detect missed call to restore ringer
-        val isMissedCall = text.contains("missed call", ignoreCase = true) ||
-                           subText.contains("missed call", ignoreCase = true) ||
-                           tickerText.contains("missed call", ignoreCase = true)
-
-        if (isBlockingWhatsAppCall && isMissedCall) {
+        if (isBlockingWhatsAppCall && text.contains("missed call", ignoreCase = true)) {
+            Log.d("WhatsAppBlocker", "Missed call detected. Restoring ringer immediately.")
             restoreRinger()
-            return 
+            return
         }
 
-        val prefs = getSharedPreferences("AppSettings", Context.MODE_PRIVATE)
+        val prefs = getSharedPreferences("AppSettings", MODE_PRIVATE)
         if (!prefs.getBoolean("block_whatsapp_unknown", false)) return
-        
-        // Detection for incoming calls (WhatsApp & WhatsApp Business)
+
         val isCall = (notification.category == Notification.CATEGORY_CALL) ||
-                     text.contains("voice call", ignoreCase = true) ||
-                     text.contains("video call", ignoreCase = true) ||
-                     text.contains("Incoming", ignoreCase = true) ||
-                     (notification.flags and Notification.FLAG_INSISTENT != 0) ||
-                     (notification.fullScreenIntent != null)
+            text.contains("Incoming voice call", ignoreCase = true) ||
+            text.contains("Incoming video call", ignoreCase = true) ||
+            (notification.flags and Notification.FLAG_INSISTENT != 0)
 
         if (isCall) {
             val callerIdentity = title.trim()
             if (callerIdentity.isNotEmpty()) {
-                // Try both original and cleaned version for contact lookup
-                val cleanIdentity = callerIdentity.replace("[^0-9+]".toRegex(), "")
-                val isKnown = isContact(callerIdentity) || (cleanIdentity.length >= 10 && isContact(cleanIdentity))
-                
-                Log.d("NotificationBlocker", "Call from: $callerIdentity (Clean: $cleanIdentity) | isKnown: $isKnown")
+                val cleanIdentity = callerIdentity.replace(" ", "").replace("-", "")
+                val isKnown = isContact(callerIdentity) || isContact(cleanIdentity)
+                val blockedNumbers = prefs.getStringSet("blocked_set", emptySet()) ?: emptySet()
+                val allowedPrefixes = emptySet<String>()
+                val blockedPrefixes = emptySet<String>()
 
-                // Decision logic: Block if not in contacts
-                if (!isKnown) {
-                    Log.d("NotificationBlocker", "MATCHED! Blocking WhatsApp call from unknown: $callerIdentity")
-                    
-                    // Trigger Edge Glow if enabled and permission is present
+                val isBlockedByPrefix = blockedPrefixes.any { cleanIdentity.startsWith(it) }
+                val isAllowedByPrefix = allowedPrefixes.any { cleanIdentity.startsWith(it) }
+                val isBlockedManually = blockedNumbers.contains(callerIdentity) || blockedNumbers.contains(cleanIdentity)
+                val shouldBlock = isBlockedByPrefix || isBlockedManually || (!isKnown && !isAllowedByPrefix)
+
+                if (shouldBlock) {
+                    Log.d("WhatsAppBlocker", "MATCHED! Blocking WhatsApp call from: $callerIdentity")
+
                     if (prefs.getBoolean("edge_glow_enabled", false) && Settings.canDrawOverlays(this)) {
                         try {
-                            val glowIntent = Intent(this, EdgeGlowService::class.java)
-                            startService(glowIntent)
-                        } catch (e: Exception) {
-                            Log.e("NotificationBlocker", "Failed to start EdgeGlowService: ${e.message}")
+                            startService(Intent(this, EdgeGlowService::class.java))
+                        } catch (_: Exception) {
                         }
                     }
 
                     silenceRingerTemporarily()
                     hideCallScreen()
 
-                    // Try to trigger Decline action if it exists
-                    val actions = notification.actions
-                    if (actions != null) {
-                        for (action in actions) {
-                            val actionTitle = action.title.toString().lowercase()
-                            if (actionTitle.contains("decline") || actionTitle.contains("hang up") ||
-                                actionTitle.contains("reject") || actionTitle.contains("dismiss")) {
-                                try {
-                                    action.actionIntent.send()
-                                    Log.d("NotificationBlocker", "Sent $actionTitle action")
-                                    break
-                                } catch (e: Exception) {
-                                    Log.e("NotificationBlocker", "Failed to send action: ${e.message}")
-                                }
-                            }
-                        }
+                    try {
+                        snoozeNotification(sbn.key, 10000)
+                    } catch (_: Exception) {
                     }
 
-                    // Always try to cancel the notification
                     cancelNotification(sbn.key)
-
-                    // For some devices, we need to cancel by tag/id as well
-                    cancelAllNotifications() // Aggressive
                 }
             }
         }
@@ -128,14 +99,14 @@ class NotificationBlockerService : NotificationListenerService() {
             addCategory(Intent.CATEGORY_HOME)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
-        
+
         try {
-            // Repeatedly push to home to ensure WhatsApp UI stays hidden
             startActivity(intent)
             handler.postDelayed({ try { startActivity(intent) } catch (_: Exception) {} }, 300)
-            handler.postDelayed({ try { startActivity(intent) } catch (_: Exception) {} }, 1000)
+            handler.postDelayed({ try { startActivity(intent) } catch (_: Exception) {} }, 800)
+            handler.postDelayed({ try { startActivity(intent) } catch (_: Exception) {} }, 1500)
         } catch (e: Exception) {
-            Log.e("NotificationBlocker", "Failed to hide call screen: ${e.message}")
+            Log.e("WhatsAppBlocker", "Failed to hide call screen: ${e.message}")
         }
     }
 
@@ -144,10 +115,10 @@ class NotificationBlockerService : NotificationListenerService() {
             if (!isBlockingWhatsAppCall) {
                 if (notificationManager.isNotificationPolicyAccessGranted) {
                     val current = notificationManager.currentInterruptionFilter
-                    if (current != NotificationManager.INTERRUPTION_FILTER_NONE) {
-                        originalFilter = current
+                    originalFilter = if (current != NotificationManager.INTERRUPTION_FILTER_NONE) {
+                        current
                     } else {
-                        originalFilter = NotificationManager.INTERRUPTION_FILTER_ALL
+                        NotificationManager.INTERRUPTION_FILTER_ALL
                     }
                 } else {
                     originalRingerMode = audioManager.ringerMode
@@ -162,16 +133,16 @@ class NotificationBlockerService : NotificationListenerService() {
             }
 
             handler.removeCallbacks(restoreRunnable)
-            handler.postDelayed(restoreRunnable, 15000) // Auto restore after 15s
+            handler.postDelayed(restoreRunnable, 15000)
         } catch (e: Exception) {
-            Log.e("NotificationBlocker", "Silence failed: ${e.message}")
+            Log.e("WhatsAppBlocker", "Silence failed: ${e.message}")
         }
     }
 
     @SuppressLint("WrongConstant")
     private fun restoreRinger() {
         if (!isBlockingWhatsAppCall) return
-        
+
         try {
             if (originalFilter != -1) {
                 notificationManager.setInterruptionFilter(originalFilter)
@@ -179,7 +150,7 @@ class NotificationBlockerService : NotificationListenerService() {
                 audioManager.ringerMode = originalRingerMode
             }
         } catch (e: Exception) {
-            Log.e("NotificationBlocker", "Restore failed: ${e.message}")
+            Log.e("WhatsAppBlocker", "Restore failed: ${e.message}")
         } finally {
             isBlockingWhatsAppCall = false
             originalFilter = -1
@@ -191,19 +162,33 @@ class NotificationBlockerService : NotificationListenerService() {
     private fun isContact(nameOrNumber: String): Boolean {
         if (nameOrNumber.isEmpty()) return false
 
-        // Check by phone number
         val phoneUri = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(nameOrNumber))
         val hasPhone = try {
-            contentResolver.query(phoneUri, arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME), null, null, null)?.use { it.count > 0 } ?: false
-        } catch (_: Exception) { false }
+            contentResolver.query(
+                phoneUri,
+                arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME),
+                null,
+                null,
+                null
+            )?.use { it.count > 0 } ?: false
+        } catch (_: Exception) {
+            false
+        }
 
         if (hasPhone) return true
 
-        // Check by name
         val nameUri = Uri.withAppendedPath(ContactsContract.Contacts.CONTENT_FILTER_URI, Uri.encode(nameOrNumber))
         return try {
-            contentResolver.query(nameUri, arrayOf(ContactsContract.Contacts.DISPLAY_NAME), null, null, null)?.use { it.count > 0 } ?: false
-        } catch (_: Exception) { false }
+            contentResolver.query(
+                nameUri,
+                arrayOf(ContactsContract.Contacts.DISPLAY_NAME),
+                null,
+                null,
+                null
+            )?.use { it.count > 0 } ?: false
+        } catch (_: Exception) {
+            false
+        }
     }
 
     override fun onDestroy() {

@@ -20,6 +20,9 @@
     <color name="spam_red">#D32F2F</color>
     <color name="verified_green">#388E3C</color>
     <color name="outgoing_blue">#2196F3</color>
+    <color name="blocked_card_bg">#FFF1F1</color>
+    <color name="whitelist_card_bg">#EEF8F0</color>
+    <color name="verified_card_bg">#EEF5FF</color>
 
     <!-- Dynamic Colors -->
     <color name="text_primary">@color/brand_black</color>
