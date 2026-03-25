@@ -9,6 +9,7 @@ import android.telecom.Call
 import android.telecom.CallScreeningService
 import android.util.Log
 import androidx.annotation.RequiresApi
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -41,17 +42,23 @@ class CallBlockerService : CallScreeningService() {
             if (handle != null && handle.scheme == "tel") {
                 val phoneNumber = handle.schemeSpecificPart
                 if (phoneNumber != null) {
-                    val isBlockedByPrefix = blockedPrefixes.any { matchesPrefix(phoneNumber, it) }
-                    val isAllowedByPrefix = allowedPrefixes.any { matchesPrefix(phoneNumber, it) }
-                    val isBlockedManually = isNumberInSet(phoneNumber, blockedNumbers)
-                    val isUnknown = !isNumberInContacts(phoneNumber)
+                    serviceScope.launch {
+                        val isBlockedByPrefix = blockedPrefixes.any { matchesPrefix(phoneNumber, it) }
+                        val isAllowedByPrefix = allowedPrefixes.any { matchesPrefix(phoneNumber, it) }
+                        val isBlockedManually = isNumberInSet(phoneNumber, blockedNumbers)
+                        val isInContacts = isNumberInContacts(phoneNumber)
+                        val isWhitelisted = isNumberInUserWhiteList(phoneNumber)
+                        val isUnknown = !isInContacts && !isWhitelisted
 
-                    if (isBlockedByPrefix || isBlockedManually || (shouldBlockUnknown && isUnknown && !isAllowedByPrefix)) {
-                        blockCall(callDetails, edgeGlowEnabled)
-                        return
+                        if (isBlockedByPrefix || isBlockedManually || (shouldBlockUnknown && isUnknown && !isAllowedByPrefix)) {
+                            withContext(Dispatchers.Main) {
+                                blockCall(callDetails, edgeGlowEnabled)
+                            }
+                            return@launch
+                        }
+
+                        checkGlobalSpamAndBlock(phoneNumber, callDetails, edgeGlowEnabled)
                     }
-
-                    checkGlobalSpamAndBlock(phoneNumber, callDetails, edgeGlowEnabled)
                     return
                 }
             }
@@ -114,6 +121,29 @@ class CallBlockerService : CallScreeningService() {
                 respondToCall(callDetails, CallResponse.Builder().build())
             }
         }
+    }
+
+    private suspend fun isNumberInUserWhiteList(phoneNumber: String): Boolean {
+        val userId = FirebaseAuth.getInstance().currentUser?.uid ?: return false
+        val lookupIds = PhoneNumberVariants.buildFirestoreDocumentIds(phoneNumber)
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+        if (lookupIds.isEmpty()) return false
+
+        val whiteListCollection = firestore
+            .collection("users")
+            .document(userId)
+            .collection("white_list_numbers")
+
+        for (lookupId in lookupIds) {
+            val snapshot = whiteListCollection.document(lookupId).get().await()
+            if (snapshot.exists()) {
+                return true
+            }
+        }
+
+        return false
     }
 
     private fun isNumberInContacts(phoneNumber: String): Boolean {

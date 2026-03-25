@@ -25,6 +25,7 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldPath
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.QuerySnapshot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -269,8 +270,14 @@ class SearchActivity : AppCompatActivity() {
                 val list = mutableListOf<CallLogItem>()
                 val searchTerms = mutableListOf<String>()
                 val numberVariants = if (isNumberQuery) buildNumberSearchVariants(cleanQuery) else emptyList()
+                val numberPrefixTerms = if (isNumberQuery) buildNumberPrefixTerms(cleanQuery) else emptyList()
 
                 searchTerms.add(cleanQuery)
+                numberPrefixTerms.forEach { term ->
+                    if (!searchTerms.contains(term)) {
+                        searchTerms.add(term)
+                    }
+                }
                 if (isAdmin && !isNumberQuery) {
                     searchTerms.add(cleanQuery.uppercase(Locale.getDefault()))
                     val capitalized = cleanQuery.lowercase(Locale.getDefault())
@@ -309,14 +316,30 @@ class SearchActivity : AppCompatActivity() {
                             list.addAll(spamSnap.documents.mapNotNull { mapToCallLogItem(it, "spam") })
                         }
 
-                        val contactNumberFields = listOf("phoneNumber", "number")
-                        for (field in contactNumberFields) {
-                            val contactSnap = db.collectionGroup("contacts")
-                                .whereIn(field, numberVariants)
-                                .limit(30)
-                                .get()
-                                .await()
-                            list.addAll(contactSnap.documents.mapNotNull { mapToCallLogItem(it, "user_contact") })
+                        val contactDocIds = numberVariants.map { it.removePrefix("+") }.distinct().take(10)
+                        val fallbackResults = fallbackSearchAllUsersContactsByDocId(contactDocIds)
+                        Log.d("SearchActivity", "fallbackUserContacts query=$cleanQuery ids=$contactDocIds count=${fallbackResults.size}")
+                        list.addAll(fallbackResults)
+
+                        if (fallbackResults.isEmpty()) {
+                            val contactNumberFields = listOf("phoneNumber", "number")
+                            for (field in contactNumberFields) {
+                                try {
+                                    val contactSnap = db.collectionGroup("contacts")
+                                        .whereIn(field, numberVariants)
+                                        .limit(30)
+                                        .get()
+                                        .await()
+                                    Log.d("SearchActivity", "contactFieldMatches query=$cleanQuery field=$field variants=$numberVariants count=${contactSnap.documents.size}")
+                                    list.addAll(contactSnap.documents.mapNotNull { mapToCallLogItem(it, "user_contact") })
+                                } catch (e: Exception) {
+                                    if (isMissingContactsCollectionGroupIndex(e)) {
+                                        Log.w("SearchActivity", "Skipping indexed contacts collectionGroup lookup for field=$field because the required Firestore index is missing", e)
+                                    } else {
+                                        throw e
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -410,6 +433,37 @@ class SearchActivity : AppCompatActivity() {
         return PhoneNumberVariants.buildFirestoreDocumentIds(query).take(10)
     }
 
+    private fun buildNumberPrefixTerms(query: String): List<String> {
+        val digits = PhoneNumberVariants.digitsOnly(query)
+        if (digits.isBlank()) return emptyList()
+
+        val terms = linkedSetOf<String>()
+        terms += digits
+
+        when {
+            digits.length <= 10 -> {
+                terms += "91$digits"
+                terms += "+91$digits"
+                terms += "0$digits"
+            }
+            digits.length == 11 && digits.startsWith("0") -> {
+                val local = digits.substring(1)
+                terms += local
+                terms += "91$local"
+                terms += "+91$local"
+            }
+            digits.length >= 11 && digits.startsWith("91") -> {
+                val local = digits.removePrefix("91")
+                if (local.isNotBlank()) {
+                    terms += local
+                    terms += "+$digits"
+                }
+            }
+        }
+
+        return terms.toList().take(10)
+    }
+
     private fun mapToCallLogItem(doc: DocumentSnapshot, lookupSource: String): CallLogItem? {
         val number = normalizeResultNumber(
             doc.getString("number"),
@@ -434,6 +488,46 @@ class SearchActivity : AppCompatActivity() {
             photoUri = null,
             lookupSource = lookupSource
         )
+    }
+
+    private suspend fun fallbackSearchAllUsersContactsByDocId(contactDocIds: List<String>): List<CallLogItem> {
+        if (contactDocIds.isEmpty()) return emptyList()
+
+        val results = mutableListOf<CallLogItem>()
+        val userSnapshots = db.collection("users")
+            .limit(200)
+            .get()
+            .await()
+        Log.d("SearchActivity", "fallbackUserContacts usersFetched=${userSnapshots.documents.size} ids=$contactDocIds")
+
+        for (userDoc in userSnapshots.documents) {
+            for (contactDocId in contactDocIds) {
+                val contactDoc = userDoc.reference
+                    .collection("contacts")
+                    .document(contactDocId)
+                    .get()
+                    .await()
+
+                if (contactDoc.exists()) {
+                    Log.d("SearchActivity", "fallbackUserContacts hit user=${userDoc.id} contactDocId=$contactDocId")
+                    mapToCallLogItem(contactDoc, "user_contact")?.let(results::add)
+                }
+            }
+            if (results.size >= 30) {
+                break
+            }
+        }
+
+        return results
+    }
+
+    private fun isMissingContactsCollectionGroupIndex(error: Throwable): Boolean {
+        val firestoreError = error as? FirebaseFirestoreException ?: return false
+        if (firestoreError.code != FirebaseFirestoreException.Code.FAILED_PRECONDITION) {
+            return false
+        }
+        val message = firestoreError.message.orEmpty()
+        return "collection contacts" in message && "index" in message.lowercase(Locale.getDefault())
     }
 
     private fun normalizeResultNumber(vararg candidates: String?): String? {

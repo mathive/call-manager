@@ -40,12 +40,14 @@ import com.google.android.gms.common.api.ApiException
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import java.util.Locale
 
 data class CallLogItem(
     var name: String,
@@ -929,33 +931,63 @@ class MainActivity : AppCompatActivity() {
             .take(10)
         if (queryCandidates.isEmpty()) return null
 
-        firestore.collectionGroup("contacts")
-            .whereIn("phoneNumber", queryCandidates)
-            .get()
-            .await()
-            .documents
-            .firstOrNull()
-            ?.let { document ->
-                return LookupProbeResult(
-                    name = extractResolvedName(requestedNumber, document.getString("primaryName"), document.getString("name")),
-                    source = source
-                )
+        for (field in listOf("phoneNumber", "number")) {
+            try {
+                firestore.collectionGroup("contacts")
+                    .whereIn(field, queryCandidates)
+                    .get()
+                    .await()
+                    .documents
+                    .firstOrNull()
+                    ?.let { document ->
+                        return LookupProbeResult(
+                            name = extractResolvedName(requestedNumber, document.getString("primaryName"), document.getString("name")),
+                            source = source
+                        )
+                    }
+            } catch (e: Exception) {
+                if (!isMissingContactsCollectionGroupIndex(e)) {
+                    throw e
+                }
             }
+        }
 
-        firestore.collectionGroup("contacts")
-            .whereIn("number", queryCandidates)
-            .get()
-            .await()
-            .documents
-            .firstOrNull()
-            ?.let { document ->
-                return LookupProbeResult(
-                    name = extractResolvedName(requestedNumber, document.getString("primaryName"), document.getString("name")),
-                    source = source
-                )
+        return fallbackLookupAllUsersContactsByDocId(firestore, queryCandidates, source, requestedNumber)
+    }
+
+    private suspend fun fallbackLookupAllUsersContactsByDocId(
+        firestore: FirebaseFirestore,
+        queryCandidates: List<String>,
+        source: String,
+        requestedNumber: String
+    ): LookupProbeResult? {
+        val userSnapshots = firestore.collection("users").limit(200).get().await()
+        for (userDoc in userSnapshots.documents) {
+            for (candidate in queryCandidates) {
+                val snapshot = userDoc.reference
+                    .collection("contacts")
+                    .document(candidate)
+                    .get()
+                    .await()
+                if (snapshot.exists()) {
+                    return LookupProbeResult(
+                        name = extractResolvedName(requestedNumber, snapshot.getString("primaryName"), snapshot.getString("name")),
+                        source = source
+                    )
+                }
             }
+        }
 
         return null
+    }
+
+    private fun isMissingContactsCollectionGroupIndex(error: Throwable): Boolean {
+        val firestoreError = error as? FirebaseFirestoreException ?: return false
+        if (firestoreError.code != FirebaseFirestoreException.Code.FAILED_PRECONDITION) {
+            return false
+        }
+        val message = firestoreError.message.orEmpty()
+        return "collection contacts" in message && "index" in message.lowercase(Locale.getDefault())
     }
 
     private fun extractResolvedName(requestedNumber: String, vararg candidates: String?): String? {

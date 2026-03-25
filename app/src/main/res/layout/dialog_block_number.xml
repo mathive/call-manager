@@ -1,31 +1,45 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="wrap_content">
+    android:layout_height="wrap_content"
+    android:background="@color/brand_white"
+    android:fillViewport="true"
+    android:padding="24dp"
+    android:scrollbars="vertical">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:paddingTop="8dp"
-        android:paddingBottom="4dp">
+        android:background="@color/brand_white"
+        android:orientation="vertical">
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="@string/select_block_reason"
             android:textColor="@color/brand_black"
-            android:textSize="16sp"
+            android:textSize="20sp"
             android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="@string/block_reason_helper"
+            android:textColor="@color/text_secondary"
+            android:textSize="14sp" />
 
         <EditText
             android:id="@+id/etBlockName"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
+            android:layout_marginTop="16dp"
+            android:backgroundTint="@color/brand_red"
             android:hint="@string/suggest_name_optional"
             android:inputType="textPersonName"
             android:maxLines="1"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp"
             android:textColor="@color/brand_black"
             android:textColorHint="@color/text_secondary" />
 
@@ -33,58 +47,88 @@
             android:id="@+id/cbForMeOnly"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
+            android:layout_marginTop="16dp"
+            android:buttonTint="@color/brand_red"
+            android:minHeight="48dp"
             android:text="@string/reason_me_only"
-            android:textColor="@color/brand_black" />
+            android:textColor="@color/brand_black"
+            android:textSize="16sp" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="8dp"
+            android:background="#E5E5E5" />
 
         <CheckBox
             android:id="@+id/cbReasonSpam"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
+            android:buttonTint="@color/brand_red"
+            android:minHeight="44dp"
             android:text="@string/reason_spam"
-            android:textColor="@color/brand_black" />
+            android:textColor="@color/brand_black"
+            android:textSize="16sp" />
 
         <CheckBox
             android:id="@+id/cbReasonHarassment"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:buttonTint="@color/brand_red"
+            android:minHeight="44dp"
             android:text="@string/reason_harassment"
-            android:textColor="@color/brand_black" />
+            android:textColor="@color/brand_black"
+            android:textSize="16sp" />
 
         <CheckBox
             android:id="@+id/cbReasonFraud"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:buttonTint="@color/brand_red"
+            android:minHeight="44dp"
             android:text="@string/reason_fraud_calls"
-            android:textColor="@color/brand_black" />
+            android:textColor="@color/brand_black"
+            android:textSize="16sp" />
 
         <CheckBox
             android:id="@+id/cbReasonOffensive"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:buttonTint="@color/brand_red"
+            android:minHeight="44dp"
             android:text="@string/reason_offensive"
-            android:textColor="@color/brand_black" />
+            android:textColor="@color/brand_black"
+            android:textSize="16sp" />
 
         <CheckBox
             android:id="@+id/cbReasonAbusing"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:buttonTint="@color/brand_red"
+            android:minHeight="44dp"
             android:text="@string/reason_abusing"
-            android:textColor="@color/brand_black" />
+            android:textColor="@color/brand_black"
+            android:textSize="16sp" />
 
         <CheckBox
             android:id="@+id/cbReasonTelemarketing"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:buttonTint="@color/brand_red"
+            android:minHeight="44dp"
             android:text="@string/reason_telemarketing"
-            android:textColor="@color/brand_black" />
+            android:textColor="@color/brand_black"
+            android:textSize="16sp" />
 
         <CheckBox
             android:id="@+id/cbReasonOther"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:buttonTint="@color/brand_red"
+            android:minHeight="44dp"
             android:text="@string/reason_other"
-            android:textColor="@color/brand_black" />
+            android:textColor="@color/brand_black"
+            android:textSize="16sp" />
     </LinearLayout>
 </ScrollView>

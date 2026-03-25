@@ -8,6 +8,7 @@ import android.content.res.ColorStateList
 import android.database.ContentObserver
 import android.database.Cursor
 import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -15,6 +16,8 @@ import android.os.Looper
 import android.provider.CallLog
 import android.provider.ContactsContract
 import android.text.format.DateUtils
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.view.LayoutInflater
 import android.view.View
 import android.widget.CheckBox
@@ -33,6 +36,7 @@ import com.google.android.material.chip.Chip
 import com.google.android.material.chip.ChipGroup
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.SetOptions
 import com.google.gson.Gson
@@ -50,6 +54,8 @@ class ContactDetailsActivity : AppCompatActivity() {
 
     private val whatsappPkg = "com.whatsapp"
     private val whatsappBusinessPkg = "com.whatsapp.w4b"
+    private val whatsappPrefsName = "whatsapp_launch_prefs"
+    private val whatsappChoiceKey = "preferred_package"
     private val observerHandler = Handler(Looper.getMainLooper())
     private val pollHandler = Handler(Looper.getMainLooper())
     private val gson = Gson()
@@ -286,13 +292,13 @@ class ContactDetailsActivity : AppCompatActivity() {
     private fun refreshPersonalListState() {
         val userId = FirebaseAuth.getInstance().currentUser?.uid ?: return
         val normalizedNumber = normalizeLookupNumber(contactNumber) ?: contactNumber
-        val documentId = normalizedNumber.removePrefix("+")
+        val documentIds = buildUserDocumentIds(normalizedNumber)
         lifecycleScope.launch(Dispatchers.IO) {
             runCatching {
                 val firestore = FirebaseFirestore.getInstance()
                 val userRef = firestore.collection("users").document(userId)
-                val blockedExists = userRef.collection("blocked_numbers").document(documentId).get().await().exists()
-                val whiteListedExists = userRef.collection("white_list_numbers").document(documentId).get().await().exists()
+                val blockedExists = documentExistsInAnyVariant(userRef.collection("blocked_numbers"), documentIds)
+                val whiteListedExists = documentExistsInAnyVariant(userRef.collection("white_list_numbers"), documentIds)
                 withContext(Dispatchers.Main) {
                     currentIsBlockedByUser = blockedExists
                     currentIsWhitelistedByUser = whiteListedExists
@@ -334,20 +340,94 @@ class ContactDetailsActivity : AppCompatActivity() {
             return
         }
 
-        val pkg = when {
-            isAppInstalled(whatsappPkg) -> whatsappPkg
-            isAppInstalled(whatsappBusinessPkg) -> whatsappBusinessPkg
-            else -> null
+        val installedPackages = buildList {
+            if (isAppInstalled(whatsappPkg)) add(whatsappPkg)
+            if (isAppInstalled(whatsappBusinessPkg)) add(whatsappBusinessPkg)
         }
 
-        if (pkg == null) {
+        if (installedPackages.isEmpty()) {
             Toast.makeText(this, R.string.whatsapp_not_installed, Toast.LENGTH_SHORT).show()
             return
         }
 
+        val rememberedPackage = getSharedPreferences(whatsappPrefsName, MODE_PRIVATE)
+            .getString(whatsappChoiceKey, null)
+
+        val packageToOpen = when {
+            rememberedPackage != null && installedPackages.contains(rememberedPackage) -> rememberedPackage
+            installedPackages.size == 1 -> installedPackages.first()
+            else -> null
+        }
+
+        if (packageToOpen != null) {
+            openWhatsappPackage(packageToOpen, cleanNumber)
+            return
+        }
+
+        showWhatsappChooser(cleanNumber, installedPackages)
+    }
+
+    private fun showWhatsappChooser(number: String, installedPackages: List<String>) {
+        val dialogView = layoutInflater.inflate(R.layout.dialog_whatsapp_picker, null)
+        val radioGroup = dialogView.findViewById<RadioGroup>(R.id.rgWhatsappApps)
+        val rememberChoice = dialogView.findViewById<CheckBox>(R.id.cbRememberWhatsappChoice)
+
+        installedPackages.forEachIndexed { index, packageName ->
+            val radioButton = RadioButton(this).apply {
+                id = View.generateViewId()
+                text = if (packageName == whatsappBusinessPkg) {
+                    getString(R.string.whatsapp_business)
+                } else {
+                    getString(R.string.whatsapp)
+                }
+                textSize = 16f
+                setTextColor(getColor(R.color.brand_black))
+                buttonTintList = ColorStateList.valueOf(getColor(R.color.brand_red))
+                minHeight = (52 * resources.displayMetrics.density).toInt()
+                setPadding(0, 10, 0, 10)
+                tag = packageName
+            }
+            radioGroup.addView(radioButton)
+            if (index == 0) {
+                radioButton.isChecked = true
+            }
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setView(dialogView)
+            .setNegativeButton(R.string.cancel, null)
+            .setPositiveButton(R.string.open, null)
+            .create()
+
+        dialog.setOnShowListener {
+            dialog.window?.setBackgroundDrawable(ColorDrawable(getColor(R.color.brand_white)))
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE)?.setTextColor(getColor(R.color.brand_red))
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.setTextColor(getColor(R.color.brand_red))
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val selectedRadioId = radioGroup.checkedRadioButtonId
+                val selectedButton = dialogView.findViewById<RadioButton>(selectedRadioId)
+                val selectedPackage = selectedButton?.tag as? String
+                if (selectedPackage.isNullOrBlank()) {
+                    Toast.makeText(this, R.string.select_whatsapp_version, Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                if (rememberChoice.isChecked) {
+                    getSharedPreferences(whatsappPrefsName, MODE_PRIVATE)
+                        .edit()
+                        .putString(whatsappChoiceKey, selectedPackage)
+                        .apply()
+                }
+                dialog.dismiss()
+                openWhatsappPackage(selectedPackage, number)
+            }
+        }
+        dialog.show()
+    }
+
+    private fun openWhatsappPackage(packageName: String, cleanNumber: String) {
         val uri = "https://api.whatsapp.com/send?phone=$cleanNumber".toUri()
         val intent = Intent(Intent.ACTION_VIEW, uri).apply {
-            setPackage(pkg)
+            setPackage(packageName)
         }
         try {
             startActivity(intent)
@@ -559,12 +639,20 @@ class ContactDetailsActivity : AppCompatActivity() {
             "Other" to dialogView.findViewById<CheckBox>(R.id.cbReasonOther)
         )
 
-        forMeOnly.setOnCheckedChangeListener { _, isChecked ->
+        fun updateReasonUiState(disabled: Boolean) {
             reasonChecks.values.forEach { checkbox ->
-                checkbox.isEnabled = !isChecked
-                if (isChecked) checkbox.isChecked = false
+                checkbox.isEnabled = !disabled
+                checkbox.alpha = if (disabled) 0.45f else 1f
             }
         }
+
+        forMeOnly.setOnCheckedChangeListener { _, isChecked ->
+            reasonChecks.values.forEach { checkbox ->
+                if (isChecked) checkbox.isChecked = false
+            }
+            updateReasonUiState(isChecked)
+        }
+        updateReasonUiState(forMeOnly.isChecked)
 
         val dialog = AlertDialog.Builder(this)
             .setView(dialogView)
@@ -573,6 +661,9 @@ class ContactDetailsActivity : AppCompatActivity() {
             .create()
 
         dialog.setOnShowListener {
+            dialog.window?.setBackgroundDrawable(ColorDrawable(getColor(R.color.brand_white)))
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE)?.setTextColor(getColor(R.color.brand_red))
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.setTextColor(getColor(R.color.brand_red))
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val selectedReasons = reasonChecks.filterValues { it.isChecked }.keys.toList()
                 if (forMeOnly.isChecked && selectedReasons.isNotEmpty()) {
@@ -755,16 +846,14 @@ class ContactDetailsActivity : AppCompatActivity() {
     private fun unblockNumber() {
         val userId = FirebaseAuth.getInstance().currentUser?.uid ?: return
         val normalizedNumber = normalizeLookupNumber(contactNumber) ?: contactNumber
-        val documentId = normalizedNumber.removePrefix("+")
+        val documentIds = buildUserDocumentIds(normalizedNumber)
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                FirebaseFirestore.getInstance()
+                val blockedCollection = FirebaseFirestore.getInstance()
                     .collection("users")
                     .document(userId)
                     .collection("blocked_numbers")
-                    .document(documentId)
-                    .delete()
-                    .await()
+                deleteAnyVariantDocuments(blockedCollection, documentIds)
 
                 val resolved = fetchRemoteNameForNumber(contactNumber)
                 withContext(Dispatchers.Main) {
@@ -805,6 +894,7 @@ class ContactDetailsActivity : AppCompatActivity() {
         val userId = FirebaseAuth.getInstance().currentUser?.uid ?: return
         val normalizedNumber = normalizeLookupNumber(contactNumber) ?: contactNumber
         val documentId = normalizedNumber.removePrefix("+")
+        val documentIds = buildUserDocumentIds(normalizedNumber)
         val isCurrentlyVerified = currentLookupSource == LookupSource.WHITELIST ||
             currentLookupSource == LookupSource.VERIFIED
 
@@ -821,10 +911,7 @@ class ContactDetailsActivity : AppCompatActivity() {
                 if (isCurrentlyVerified) {
                     docRef.delete().await()
                 } else {
-                    val blockedRef = userRef.collection("blocked_numbers").document(documentId)
-                    if (blockedRef.get().await().exists()) {
-                        blockedRef.delete().await()
-                    }
+                    deleteAnyVariantDocuments(userRef.collection("blocked_numbers"), documentIds)
                     docRef.set(
                         hashMapOf(
                             "name" to currentDisplayName.ifBlank { normalizedNumber },
@@ -1169,33 +1256,63 @@ class ContactDetailsActivity : AppCompatActivity() {
             .take(10)
         if (queryCandidates.isEmpty()) return null
 
-        firestore.collectionGroup("contacts")
-            .whereIn("phoneNumber", queryCandidates)
-            .get()
-            .await()
-            .documents
-            .firstOrNull()
-            ?.let { document ->
-                return LookupProbeResult(
-                    name = extractResolvedName(requestedNumber, document.getString("primaryName"), document.getString("name")),
-                    source = source
-                )
+        for (field in listOf("phoneNumber", "number")) {
+            try {
+                firestore.collectionGroup("contacts")
+                    .whereIn(field, queryCandidates)
+                    .get()
+                    .await()
+                    .documents
+                    .firstOrNull()
+                    ?.let { document ->
+                        return LookupProbeResult(
+                            name = extractResolvedName(requestedNumber, document.getString("primaryName"), document.getString("name")),
+                            source = source
+                        )
+                    }
+            } catch (e: Exception) {
+                if (!isMissingContactsCollectionGroupIndex(e)) {
+                    throw e
+                }
             }
+        }
 
-        firestore.collectionGroup("contacts")
-            .whereIn("number", queryCandidates)
-            .get()
-            .await()
-            .documents
-            .firstOrNull()
-            ?.let { document ->
-                return LookupProbeResult(
-                    name = extractResolvedName(requestedNumber, document.getString("primaryName"), document.getString("name")),
-                    source = source
-                )
+        return fallbackLookupAllUsersContactsByDocId(firestore, queryCandidates, source, requestedNumber)
+    }
+
+    private suspend fun fallbackLookupAllUsersContactsByDocId(
+        firestore: FirebaseFirestore,
+        queryCandidates: List<String>,
+        source: String,
+        requestedNumber: String
+    ): LookupProbeResult? {
+        val userSnapshots = firestore.collection("users").limit(200).get().await()
+        for (userDoc in userSnapshots.documents) {
+            for (candidate in queryCandidates) {
+                val snapshot = userDoc.reference
+                    .collection("contacts")
+                    .document(candidate)
+                    .get()
+                    .await()
+                if (snapshot.exists()) {
+                    return LookupProbeResult(
+                        name = extractResolvedName(requestedNumber, snapshot.getString("primaryName"), snapshot.getString("name")),
+                        source = source
+                    )
+                }
             }
+        }
 
         return null
+    }
+
+    private fun isMissingContactsCollectionGroupIndex(error: Throwable): Boolean {
+        val firestoreError = error as? FirebaseFirestoreException ?: return false
+        if (firestoreError.code != FirebaseFirestoreException.Code.FAILED_PRECONDITION) {
+            return false
+        }
+        val message = firestoreError.message.orEmpty()
+        return "collection contacts" in message && "index" in message.lowercase(Locale.getDefault())
     }
 
     private fun extractResolvedName(requestedNumber: String, vararg candidates: String?): String? {
@@ -1239,6 +1356,37 @@ class ContactDetailsActivity : AppCompatActivity() {
     private fun normalizeLookupNumber(number: String): String? {
         return PhoneNumberVariants.toIndianMobilePlus(number)
             ?: PhoneNumberVariants.digitsOnly(number).takeIf { it.isNotBlank() }?.let { "+$it" }
+    }
+
+    private fun buildUserDocumentIds(number: String): List<String> {
+        return PhoneNumberVariants.buildFirestoreDocumentIds(number)
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+    }
+
+    private suspend fun documentExistsInAnyVariant(
+        collection: com.google.firebase.firestore.CollectionReference,
+        documentIds: List<String>
+    ): Boolean {
+        for (documentId in documentIds) {
+            if (collection.document(documentId).get().await().exists()) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private suspend fun deleteAnyVariantDocuments(
+        collection: com.google.firebase.firestore.CollectionReference,
+        documentIds: List<String>
+    ) {
+        for (documentId in documentIds) {
+            val docRef = collection.document(documentId)
+            if (docRef.get().await().exists()) {
+                docRef.delete().await()
+            }
+        }
     }
 
     private fun sameNumber(first: String, second: String): Boolean {

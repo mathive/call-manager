@@ -53,6 +53,7 @@
     <string name="edge_glow_alert">Edge glow alert</string>
     <string name="logout">Logout</string>
     <string name="select_block_reason">Select reason for blocking</string>
+    <string name="block_reason_helper">Choose one or more reasons, or keep it personal only.</string>
     <string name="reason_spam">Spam</string>
     <string name="reason_harassment">Harassment</string>
     <string name="reason_fraud_calls">Fraud calls</string>
@@ -97,8 +98,10 @@
     <string name="reported_successfully">Reported successfully</string>
     <string name="whatsapp_not_installed">WhatsApp is not installed</string>
     <string name="select_whatsapp_version">Select WhatsApp Version</string>
+    <string name="whatsapp_picker_helper">Choose where you want to continue this chat.</string>
+    <string name="whatsapp_business">WhatsApp Business</string>
     <string name="open">Open</string>
-    <string name="always_use_this">Always Use This</string>
+    <string name="always_use_this">Remember my choice</string>
     <string name="could_not_open_whatsapp">Could not open WhatsApp</string>
     <string name="yesterday">Yesterday</string>
     <string name="administrator">Administrator</string>
